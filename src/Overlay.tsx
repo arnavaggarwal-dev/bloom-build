@@ -1,16 +1,27 @@
-import { StrictMode, useState, useEffect, useRef, useCallback, useLayoutEffect } from "react";
+import { StrictMode, useState, useEffect, useRef, useCallback, useLayoutEffect, lazy, Suspense, type CSSProperties } from "react";
 import { createRoot } from "react-dom/client";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
 import { listen, emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { useSettingsSync } from "./hooks/useSettingsSync";
 import { useTrailingThrottle } from "./hooks/useTrailingThrottle";
+import { useSliderSync, useTransientError } from "./hooks/useSliderSync";
 import { getVersion } from "@tauri-apps/api/app";
 import { reloadIfMirrorWasStale } from "./hooks/settingsMirror";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { MixerIcon, SpeakerIcon } from "./icons";
 import "./Overlay.css";
 import { initTheme } from "./theme";
+import { useAi } from "./ai/useAi";
+import { AiOrb } from "./ai/AiOrb";
+import { plainText } from "./ai/mdText";
+import "./ai/ai.css";
+import { useInfoCentre } from "./hooks/useGlass";
+
+// Loaded on the first answer, like the panel does, so the overlay starts light.
+const Markdown = lazy(() => import("./ai/Markdown"));
+// The caption card's spring, close to the orb's own so they move as one.
+const CARD_SPRING = { type: "spring", stiffness: 260, damping: 26, mass: 0.9 } as const;
 
 // ─── App Volume Mixer ───────────────────────────────────────────────────────
 
@@ -99,7 +110,7 @@ function MixerTile({
 				className="volume-mixer-bar"
 				onMouseDown={handleMouseDown}
 				onTouchStart={(e) => volumeFromY(e.touches[0].clientY)}
-				title={`${session.name} — ${percentage}%`}
+				title={`${session.name}: ${percentage}%`}
 				style={{ cursor: "pointer" }}
 			>
 				<motion.div
@@ -488,10 +499,12 @@ const SunIcon = ({ brightness }: { brightness: number }) => (
 
 function BrightnessNotch({
 	brightness,
-	onBrightnessChange
+	onBrightnessChange,
+	error
 }: {
 	brightness: number;
 	onBrightnessChange: (val: number) => void;
+	error: string | null;
 }) {
 	const barRef = useRef<HTMLDivElement>(null);
 
@@ -547,7 +560,10 @@ function BrightnessNotch({
 				>
 					<div
 						ref={barRef}
-						className="brightness-notch-bar"
+						className={`brightness-notch-bar${error ? " error" : ""}`}
+						title={error ?? undefined}
+						role={error ? "alert" : undefined}
+						aria-label={error ?? undefined}
 						onMouseDown={handleMouseDown}
 						onTouchStart={handleBarInteraction}
 						style={{ cursor: "pointer" }}
@@ -604,6 +620,7 @@ function OverlayApp() {
 	const [scale, setScale] = useState(() =>
 		parseFloat(localStorage.getItem("bloom-scale") || "1.0")
 	);
+	const [merged] = useInfoCentre();
 	const timeoutRef = useRef<any>(null);
 	const hideWindowTimeoutRef = useRef<any>(null);
 	const splashActiveRef = useRef(false);
@@ -637,16 +654,24 @@ function OverlayApp() {
 			.catch(console.error);
 	}, []);
 
-	// Seed the HUD with the live system volume; the system worker's only
-	// startup event fires before this webview can register listeners.
-	useEffect(() => {
+	// Seed the HUD with the live system levels; the system worker's only
+	// startup event fires before this webview can register listeners. Also
+	// re-read when a HUD is opened from the edge and after a drag settles.
+	const syncLevels = () => {
 		invoke<{ volume: number; is_muted: boolean }>("get_volume_state")
 			.then((state) => {
 				setVolume(state.volume);
 				setIsMuted(state.is_muted);
 			})
 			.catch(() => {});
-	}, []);
+		invoke<number>("get_brightness")
+			.then(setBrightness)
+			.catch(() => {});
+	};
+	const volumeSync = useSliderSync(syncLevels);
+	const brightnessSync = useSliderSync(syncLevels);
+	const brightnessError = useTransientError("brightness-error");
+	useEffect(syncLevels, []);
 
 	// ── Splash Detection ──
 	useEffect(() => {
@@ -704,8 +729,10 @@ function OverlayApp() {
 			if (splashActiveRef.current || !volumeOverlayEnabled) return;
 			invoke("hide_native_osd");
 			const { volume: newVolume, is_muted } = event.payload;
-			setVolume(newVolume);
-			setIsMuted(is_muted);
+			if (volumeSync.accepts()) {
+				setVolume(newVolume);
+				setIsMuted(is_muted);
+			}
 			setMode("volume");
 			resetHideTimeout();
 		});
@@ -713,6 +740,7 @@ function OverlayApp() {
 		const volEdgePromise = listen<boolean>("volume-edge-hover", (event) => {
 			if (splashActiveRef.current || !volumeOverlayEnabled || !volumeEdgeEnabled) return;
 			if (event.payload) {
+				syncLevels();
 				setMode("volume");
 				if (timeoutRef.current) clearTimeout(timeoutRef.current);
 			} else {
@@ -728,7 +756,7 @@ function OverlayApp() {
 			if (splashActiveRef.current || !brightnessOverlayEnabled) return;
 			invoke("hide_native_osd");
 			const { brightness: newBrightness } = event.payload;
-			setBrightness(newBrightness);
+			if (brightnessSync.accepts()) setBrightness(newBrightness);
 			setMode("brightness");
 			resetHideTimeout();
 		});
@@ -736,6 +764,7 @@ function OverlayApp() {
 		const brightEdgePromise = listen<boolean>("brightness-edge-hover", (event) => {
 			if (splashActiveRef.current || !brightnessOverlayEnabled || !brightnessEdgeEnabled) return;
 			if (event.payload) {
+				syncLevels();
 				setMode("brightness");
 				if (timeoutRef.current) clearTimeout(timeoutRef.current);
 			} else {
@@ -787,6 +816,63 @@ function OverlayApp() {
 		"bloom-scale": setScale
 	});
 
+	// Only a HUD card makes the overlay's edge rects clickable (services.rs);
+	// the orb never does.
+	const hudUp = mode === "volume" || mode === "brightness";
+	useEffect(() => {
+		invoke("set_overlay_hud", { up: hudUp }).catch(() => {});
+	}, [hudUp]);
+
+	// ── Bloom AI orb ──
+	// "Hey <name>" shows the orb here instead of opening the panel. A request
+	// that needs an OK moves to the panel (App.tsx / Dock.tsx open it on the
+	// confirm), so the orb lets go of it; a finished one fades after 5 s.
+	const ai = useAi(() => {});
+	const { phase, wake } = ai.state;
+	// A splash or update screen hides it too: it fades out like any other end.
+	const orbShown =
+		ai.enabled && wake && phase !== "idle" && phase !== "confirm" && mode !== "splash" && mode !== "updating";
+	// Mounted from the first show until the orb reports it has faded out, so it
+	// never vanishes mid-motion; showing it again mid-fade just retargets it.
+	const [orbMounted, setOrbMounted] = useState(false);
+	if (orbShown && !orbMounted) setOrbMounted(true);
+	const unmountOrb = useCallback(() => setOrbMounted(false), []);
+	// The whole reply, rendered like the panel. The overlay is click-through, so
+	// it can't scroll: a reply too tall for the card opens in the panel instead.
+	const answered = phase === "done" || phase === "error";
+	const reply = ai.state.reply;
+	const caption = answered ? reply : ai.state.heard;
+	const resetAi = ai.reset;
+	const reduceMotion = useReducedMotion();
+	useEffect(() => {
+		if (!wake) return;
+		if (phase === "confirm") {
+			resetAi();
+			return;
+		}
+		if (phase !== "done" && phase !== "error") return;
+		// Long enough to read: 5 s plus about 20 characters a second, up to 30 s.
+		const t = setTimeout(resetAi, Math.min(30000, 5000 + reply.length * 50));
+		return () => clearTimeout(t);
+	}, [wake, phase, reply, resetAi]);
+	const captionRef = useRef<HTMLDivElement>(null);
+	useLayoutEffect(() => {
+		const el = captionRef.current;
+		if (!el || !wake || phase !== "done") return;
+		const check = () => {
+			if (el.scrollHeight > el.clientHeight + 2) {
+				invoke("ai_open").catch(() => {});
+				resetAi();
+			}
+		};
+		check();
+		// The Markdown chunk loads after the first paint and can grow the card.
+		const ro = new ResizeObserver(check);
+		for (const child of Array.from(el.children)) ro.observe(child);
+		ro.observe(el);
+		return () => ro.disconnect();
+	}, [wake, phase, reply, resetAi]);
+
 	// Side effects: reset overlay mode to idle when overlay is disabled
 	useEffect(() => {
 		if (splashActiveRef.current) return;
@@ -808,15 +894,14 @@ function OverlayApp() {
 					hideWindowTimeoutRef.current = null;
 				}
 
-				if (mode === "idle") {
+				if (mode === "idle" && !orbMounted) {
 					// Wait for exit animation to finish before hiding
 					hideWindowTimeoutRef.current = setTimeout(async () => {
 						await appWindow.hide();
 					}, 400);
 				} else {
-					// Position the window first, then show
-					await invoke("sync_overlay_position");
-					await appWindow.show();
+					// Position the window first, then show it without taking focus
+					await invoke("show_overlay");
 				}
 			} catch (e) {
 				console.error("Window management error:", e);
@@ -831,7 +916,7 @@ function OverlayApp() {
 		return () => {
 			if (hideWindowTimeoutRef.current) clearTimeout(hideWindowTimeoutRef.current);
 		};
-	}, [mode]);
+	}, [mode, orbMounted]);
 
 	// ── Volume Controls ──
 	const sendVolume = useTrailingThrottle((newVol: number) => {
@@ -839,13 +924,14 @@ function OverlayApp() {
 	}, 50);
 	const handleVolumeChange = useCallback(
 		(newVol: number) => {
+			volumeSync.touch();
 			setVolume(newVol);
 			setIsMuted(newVol === 0);
 			setMode("volume");
 			resetHideTimeout();
 			sendVolume(newVol);
 		},
-		[resetHideTimeout, sendVolume]
+		[resetHideTimeout, sendVolume, volumeSync]
 	);
 
 	const handleMixerExpandedChange = useCallback(
@@ -887,12 +973,13 @@ function OverlayApp() {
 	}, 50);
 	const handleBrightnessChange = useCallback(
 		(newBrightness: number) => {
+			brightnessSync.touch();
 			setBrightness(newBrightness);
 			setMode("brightness");
 			resetHideTimeout();
 			sendBrightness(newBrightness);
 		},
-		[resetHideTimeout, sendBrightness]
+		[resetHideTimeout, sendBrightness, brightnessSync]
 	);
 
 	const isLeft = mode === "volume";
@@ -954,6 +1041,52 @@ function OverlayApp() {
 				)}
 			</AnimatePresence>
 
+			{/* Bloom AI orb: under the notch, or above the dock when merged */}
+			{orbMounted && (
+				<div
+					className={`ai-orb-float ${merged ? "dock" : "notch"}`}
+					style={{ "--ai-zoom": scale } as CSSProperties}
+				>
+					{/* bloom-scale zooms inside each motion wrapper, never around one:
+					    framer measures and moves them in unzoomed pixels, and a zoomed
+					    ancestor would scale its layout correction a second time. */}
+					<div className="ai-orb-float-card">
+						{/* Above the dock a growing card pushes the orb up: it glides there. */}
+						<motion.div layout={reduceMotion ? false : "position"} transition={CARD_SPRING}>
+							<div style={{ zoom: scale }}>
+								<AiOrb phase={phase} size={64} float shown={orbShown} onHidden={unmountOrb} />
+							</div>
+						</motion.div>
+						<AnimatePresence mode="popLayout" initial={false}>
+							{orbShown && caption && (
+								<motion.div
+									key={answered ? "reply" : "heard"}
+									className="ai-orb-caption-wrap"
+									initial={reduceMotion ? { opacity: 0 } : { opacity: 0, y: merged ? 8 : -8, scale: 0.92 }}
+									animate={{ opacity: 1, y: 0, scale: 1 }}
+									exit={reduceMotion ? { opacity: 0 } : { opacity: 0, y: merged ? 6 : -6, scale: 0.94 }}
+									transition={CARD_SPRING}
+								>
+									<div
+										ref={captionRef}
+										className={`ai-orb-caption ${phase}${phase === "done" ? " answer" : ""}`}
+										style={{ zoom: scale }}
+									>
+										{phase === "done" ? (
+											<Suspense fallback={<p>{plainText(caption)}</p>}>
+												<Markdown text={caption} />
+											</Suspense>
+										) : (
+											caption
+										)}
+									</div>
+								</motion.div>
+							)}
+						</AnimatePresence>
+					</div>
+				</div>
+			)}
+
 			{/* Volume / Brightness Overlay */}
 			{mode !== "splash" && mode !== "updating" && (
 				<div
@@ -986,6 +1119,7 @@ function OverlayApp() {
 							<BrightnessNotch
 								brightness={brightness}
 								onBrightnessChange={handleBrightnessChange}
+								error={brightnessError}
 								key="brightness-island"
 							/>
 						)}

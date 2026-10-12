@@ -1,0 +1,31 @@
+name: cloud-build
+# Builds Bloom and its bloom-ai sidecar on every push; install-cloud.bat downloads the result.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+concurrency:
+  group: build
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: bun install --frozen-lockfile
+      - run: bun run ai:build
+      - run: bun run tauri build --no-bundle
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bloom-windows
+          retention-days: 14
+          path: |
+            src-tauri/target/release/bloom.exe
+            src-tauri/target/release/bloom-ai.exe
