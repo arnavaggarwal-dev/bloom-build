@@ -514,38 +514,11 @@ pub async fn change_notch_mode(app: AppHandle, mode: String) {
 
 #[cfg(windows)]
 fn get_uwp_launch_cmd(exe_path: &str) -> Option<String> {
-    let path = std::path::Path::new(exe_path);
-    let mut is_windows_apps = false;
-    let mut package_folder = String::new();
-
-    for component in path.components() {
-        if let std::path::Component::Normal(s) = component {
-            let s_str = s.to_string_lossy();
-            if is_windows_apps {
-                package_folder = s_str.to_string();
-                break;
-            }
-            if s_str.eq_ignore_ascii_case("WindowsApps") {
-                is_windows_apps = true;
-            }
-        }
-    }
-
-    if !package_folder.is_empty() {
-        // package_folder format: PackageName_Version_Architecture__PublisherId
-        // We want: PackageName_PublisherId!App
-        if let Some(publisher_idx) = package_folder.rfind("__") {
-            let publisher_id = &package_folder[publisher_idx + 2..];
-            if let Some(first_underscore) = package_folder.find('_') {
-                let package_name = &package_folder[..first_underscore];
-                return Some(format!(
-                    "shell:AppsFolder\\{}_{}!App",
-                    package_name, publisher_id
-                ));
-            }
-        }
-    }
-    None
+    let family = package_family_from_windows_apps_path(exe_path)?;
+    // The app's real id from the shell: "!App" is only the common suffix, and
+    // a guess is silently not launched (new Teams is "MSTeams_...!MSTeams").
+    let aumid = find_aumid_by_family(&family).unwrap_or_else(|| format!("{family}!App"));
+    Some(format!("shell:AppsFolder\\{}", aumid.trim_start_matches("shell:AppsFolder\\")))
 }
 
 /// Duplicate-event guard. Kept well below the double-click interval so a
