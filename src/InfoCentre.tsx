@@ -383,6 +383,10 @@ export function InfoRight({ active, onOpen }: ZoneProps) {
 
 // ── Panel ────────────────────────────────────────────────────────────────────
 
+// One critically damped spring (no overshoot) for the bar's shape, its
+// contents and the info panel, so they move as one surface and finish together.
+export const DOCK_SPRING = { type: "spring", bounce: 0, duration: 0.4 } as const;
+
 // Tab content slides in the direction of travel, with a short blur, like a carousel.
 const SLIDE: Variants = {
 	enter: (dir: number) => ({ x: dir * 70, opacity: 0, filter: "blur(6px)" }),
@@ -447,10 +451,12 @@ export function InfoPanel({ tab, setTab, onResize }: PanelProps) {
 			ref={ref}
 			className="ic-panel"
 			// Unrolls upward out of the bar, and rolls back into it on close.
-			initial={{ clipPath: "inset(100% 0% 0% 0% round 18px 18px 0px 0px)", opacity: 0.4, height: PANEL_HEIGHT }}
-			animate={{ clipPath: "inset(0% 0% 0% 0% round 18px 18px 0px 0px)", opacity: 1, height: PANEL_HEIGHT }}
-			exit={{ clipPath: "inset(100% 0% 0% 0% round 18px 18px 0px 0px)", opacity: 0.4 }}
-			transition={{ type: "spring", stiffness: 300, damping: 32 }}
+			// Same path both ways and the bar's own spring: no fade, so it reads as
+			// one surface unrolling from the bar and rolling back into it.
+			initial={{ clipPath: "inset(100% 0% 0% 0% round 18px 18px 0px 0px)", height: PANEL_HEIGHT }}
+			animate={{ clipPath: "inset(0% 0% 0% 0% round 18px 18px 0px 0px)", height: PANEL_HEIGHT }}
+			exit={{ clipPath: "inset(100% 0% 0% 0% round 18px 18px 0px 0px)" }}
+			transition={DOCK_SPRING}
 			onAnimationComplete={onResize}
 			onWheel={onWheel}
 			onClick={(e) => e.stopPropagation()}

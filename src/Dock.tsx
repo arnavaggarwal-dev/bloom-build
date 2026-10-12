@@ -6,7 +6,7 @@ import "./Dock.css";
 import { initTheme } from "./theme";
 import { useSettingsSync } from "./hooks/useSettingsSync";
 import { reloadIfMirrorWasStale } from "./hooks/settingsMirror";
-import { InfoLeft, InfoPanel, InfoProvider, InfoRight, type InfoTab } from "./InfoCentre";
+import { DOCK_SPRING, InfoLeft, InfoPanel, InfoProvider, InfoRight, type InfoTab } from "./InfoCentre";
 import { useGlass, useGlassEnabled, useInfoCentre } from "./hooks/useGlass";
 
 import { mergeTrayApps, selectDockTrayApps, type AppInfo, type TrayApp } from "./dockApps";
@@ -461,6 +461,12 @@ const Dock = memo(function Dock() {
 		"bloom-dock-extras-custom-folders": () => setDockExtrasRevision((r) => r + 1)
 	});
 	const infoOpen = infoCentre && !!infoTab && isExpanded && !isHidden && isVisible;
+	// The bar's top corners stay square until the panel has rolled all the way
+	// back in, or they round off early and open a gap under the closing panel.
+	const [panelUp, setPanelUp] = useState(false);
+	useEffect(() => {
+		if (infoOpen) setPanelUp(true);
+	}, [infoOpen]);
 	// One glass sheet: the open info panel and the dock under it share it.
 	const glass = useGlassEnabled();
 	const infoOpenRef = useRef(infoOpen);
@@ -1157,8 +1163,8 @@ const Dock = memo(function Dock() {
 						width:
 							isExpanded && !isHidden && isVisible ? (isAdaptive ? adaptiveWidth : "auto") : 34,
 						height: isExpanded && !isHidden && isVisible ? "auto" : 34,
-						borderTopLeftRadius: infoOpen ? 0 : (isImpacted || isExpanded) && !isHidden && isVisible ? 18 : 17,
-						borderTopRightRadius: infoOpen ? 0 : (isImpacted || isExpanded) && !isHidden && isVisible ? 18 : 17,
+						borderTopLeftRadius: infoOpen || panelUp ? 0 : (isImpacted || isExpanded) && !isHidden && isVisible ? 18 : 17,
+						borderTopRightRadius: infoOpen || panelUp ? 0 : (isImpacted || isExpanded) && !isHidden && isVisible ? 18 : 17,
 						borderBottomLeftRadius: (isImpacted || isExpanded) && !isHidden && isVisible ? 0 : 17,
 						borderBottomRightRadius: (isImpacted || isExpanded) && !isHidden && isVisible ? 0 : 17,
 						opacity: isVisible ? 1 : 0,
@@ -1166,13 +1172,13 @@ const Dock = memo(function Dock() {
 					}}
 					transition={{
 						y: { type: "spring", stiffness: 400, damping: 35, mass: 0.8 },
-						width: { type: "spring", stiffness: 250, damping: 22, mass: 0.8 },
-						height: { type: "spring", stiffness: 250, damping: 22, mass: 0.8 },
+						width: DOCK_SPRING,
+						height: DOCK_SPRING,
 						layout: isDragging ? { duration: 0 } : { type: "spring", stiffness: 300, damping: 25 },
-						borderTopLeftRadius: { type: "spring", stiffness: 500, damping: 30 },
-						borderTopRightRadius: { type: "spring", stiffness: 500, damping: 30 },
-						borderBottomLeftRadius: { type: "spring", stiffness: 500, damping: 30 },
-						borderBottomRightRadius: { type: "spring", stiffness: 500, damping: 30 },
+						borderTopLeftRadius: DOCK_SPRING,
+						borderTopRightRadius: DOCK_SPRING,
+						borderBottomLeftRadius: DOCK_SPRING,
+						borderBottomRightRadius: DOCK_SPRING,
 						opacity: { type: "tween", duration: 0.2 },
 						scale: { duration: 0 }
 					}}
@@ -1187,10 +1193,12 @@ const Dock = memo(function Dock() {
 						{isExpanded && (
 							<motion.div
 								key="dock-content"
-								initial={{ opacity: 0 }}
-								animate={{ opacity: 1 }}
-								exit={{ opacity: 0 }}
-								transition={{ duration: 0.15 }}
+								// Converges with the bar instead of hanging outside it while
+								// it shrinks (the dock doesn't clip: its menus overflow).
+								initial={{ opacity: 0, scale: 0.6 }}
+								animate={{ opacity: 1, scale: 1 }}
+								exit={{ opacity: 0, scale: 0.6 }}
+								transition={{ scale: DOCK_SPRING, opacity: { duration: 0.18 } }}
 								className="dock-reorder-container"
 							>
 								{infoCentre && (
@@ -1594,7 +1602,7 @@ const Dock = memo(function Dock() {
 							</motion.div>
 						)}
 					</AnimatePresence>
-					<AnimatePresence>
+					<AnimatePresence onExitComplete={() => setPanelUp(false)}>
 						{infoOpen && (
 							<div ref={infoPanelRef} className="ic-panel-anchor" key="info-panel">
 								<InfoPanel
