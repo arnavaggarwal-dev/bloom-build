@@ -8,11 +8,6 @@ import { useSettingsSync } from "./hooks/useSettingsSync";
 import { reloadIfMirrorWasStale } from "./hooks/settingsMirror";
 import { InfoLeft, InfoPanel, InfoProvider, InfoRight, type InfoTab } from "./InfoCentre";
 import { useGlass, useGlassEnabled, useInfoCentre } from "./hooks/useGlass";
-import { Sparkles } from "lucide-react";
-import { AiPanel } from "./ai/AiPanel";
-import { useAiName } from "./ai/aiName";
-import { useAi } from "./ai/useAi";
-import { isBusy } from "./ai/aiState";
 
 import { mergeTrayApps, selectDockTrayApps, type AppInfo, type TrayApp } from "./dockApps";
 import { removeCustomFolder, type DockExtra } from "./dockExtras";
@@ -184,14 +179,11 @@ const Dock = memo(function Dock() {
 	const [startupAnimating, setStartupAnimating] = useState(false);
 	const [customIcons, setCustomIcons] = useState<Record<string, string>>({});
 	const [toast, setToast] = useState<string | null>(null);
-	// A notice rather than an error (shown in the normal text colour).
-	const [toastInfo, setToastInfo] = useState(false);
 	const iconPickerTargetRef = useRef<string | null>(null);
 	const toastTimerRef = useRef<any>(null);
-	const showToast = (msg: string, info = false) => {
+	const showToast = (msg: string) => {
 		if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
 		setToast(msg);
-		setToastInfo(info);
 		toastTimerRef.current = setTimeout(() => setToast(null), 4000);
 	};
 	const dockRef = useRef<HTMLDivElement>(null);
@@ -211,54 +203,19 @@ const Dock = memo(function Dock() {
 	const infoPanelRef = useRef<HTMLDivElement>(null);
 	const updateRectRef = useRef(() => {});
 	const openInfo = (tab: InfoTab | null) => {
-		if (aiOpen) return; // the AI panel wins while it is open
 		if (infoCloseTimer.current) clearTimeout(infoCloseTimer.current);
 		setInfoTab((cur) => tab ?? cur);
 	};
-	// Leaving the dock (or hovering an app) closes the panel, except on the AI
-	// tab: that one stays until it is closed, as in the notch. While Janice is
-	// busy an open panel goes back to her tab instead of closing, so Stop and
-	// the confirm card stay in reach.
-	const aiOwnRef = useRef(false);
-	const keepAi = (t: InfoTab | null) => (t === "ai" || (t && aiOwnRef.current) ? "ai" : null);
+	// Leaving the dock (or hovering an app) closes the panel.
 	const scheduleInfoClose = () => {
 		if (infoCloseTimer.current) clearTimeout(infoCloseTimer.current);
-		infoCloseTimer.current = setTimeout(() => setInfoTab(keepAi), 350);
+		infoCloseTimer.current = setTimeout(() => setInfoTab(null), 350);
 	};
 
-	// Bloom AI in merged mode: a tab of the info panel, so it unrolls from the
-	// bar like the others. In notch mode Bloom sends `ai-open` to the notch instead.
-	const aiOpen = infoTab === "ai";
-	const [aiFocus, setAiFocus] = useState(false);
-	// The panel's natural height (AiPanel onHeight): the info panel grows to it.
-	const [aiHeight, setAiHeight] = useState(0);
-	const aiName = useAiName();
-	const ai = useAi((recording) => {
-		if (!infoCentre) return;
-		setAiFocus(!recording);
-		setInfoTab("ai");
-	});
-	// The dock hears every `ai-event`, the notch's too: it only owns a busy task
-	// that was running while merged, and keeps owning it until it ends. A
-	// "Hey <name>" request belongs to the overlay's orb until it asks for an OK.
-	if (!isBusy(ai.state.phase)) aiOwnRef.current = false;
-	else if (infoCentre && (!ai.state.wake || aiOpen)) aiOwnRef.current = true;
-	const closeAi = () => {
-		ai.stop();
-		ai.reset();
-		setInfoTab(null);
-	};
-	// Picking a tab: the AI tab focuses its text box, as the dock button does.
-	const pickTab = (t: InfoTab) => {
-		setAiFocus(t === "ai");
-		setInfoTab(t);
-	};
-	// AI off, Delete AI or unmerging stops Janice even if another tab is showing,
-	// but only a task the dock owns (never one the notch started).
+	// Unmerging closes the panel.
 	useEffect(() => {
-		if ((!ai.enabled || !infoCentre) && (aiOpen || aiOwnRef.current)) closeAi();
 		if (!infoCentre) setInfoTab(null);
-	}, [ai.enabled, infoCentre, aiOpen]);
+	}, [infoCentre]);
 	// Merged mode: dragging a file or text onto the dock opens the Shelf tab;
 	// the drop itself lands in the notch's shelf list (App.tsx).
 	useEffect(() => {
@@ -267,7 +224,7 @@ const Dock = memo(function Dock() {
 			listen<{ window?: string }>("shelf-drag-enter", (e) => {
 				if (e.payload.window !== "dock" || !infoCentreRef.current) return;
 				if (infoCloseTimer.current) clearTimeout(infoCloseTimer.current);
-				setInfoTab((cur) => (cur === "ai" ? cur : "shelf"));
+				setInfoTab("shelf");
 			}),
 			listen<{ window?: string }>("shelf-drag-leave", (e) => {
 				if (e.payload?.window === "dock") scheduleInfoClose();
@@ -275,27 +232,6 @@ const Dock = memo(function Dock() {
 		];
 		return () => offs.forEach((off) => off.then((fn) => fn()));
 	}, []);
-	// A request waiting for an OK brings the AI tab back if another tab is showing.
-	useEffect(() => {
-		if (ai.state.confirm && ai.enabled && infoCentre) setInfoTab("ai");
-	}, [ai.state.confirm?.id]);
-	// Each automatic WhatsApp reply: "Janice replied to Neha"; each request
-	// from the user's own WhatsApp chat: "Janice is working on a request from your phone".
-	const aiNameRef = useRef(aiName);
-	aiNameRef.current = aiName;
-	useEffect(() => {
-		const off = listen<{ type: string; name?: string }>("ai-event", ({ payload }) => {
-			if (payload.type === "whatsapp_auto_reply") showToast(`${aiNameRef.current} replied to ${payload.name}`, true);
-			if (payload.type === "whatsapp_request") showToast(`${aiNameRef.current} is working on a request from your phone`, true);
-		});
-		return () => {
-			off.then((f) => f());
-		};
-	}, []);
-	// A preview already showing when the panel opens would overlap it.
-	useEffect(() => {
-		if (aiOpen) setPreviewData(null);
-	}, [aiOpen]);
 
 	useEffect(() => {
 		const onResize = () => setViewportWidth(window.innerWidth);
@@ -333,7 +269,6 @@ const Dock = memo(function Dock() {
 
 	const isHidden =
 		!startupAnimating &&
-		!aiOpen &&
 		infoTab !== "shelf" &&
 		((dockMode === "smart" && isOverlapped && interactionState === "none") ||
 			(dockMode === "peek" && interactionState === "none"));
@@ -539,7 +474,7 @@ const Dock = memo(function Dock() {
 
 	// Window previews float where the panel is: an app hover closes the panel.
 	useEffect(() => {
-		if (hoveredApp) setInfoTab(keepAi);
+		if (hoveredApp) setInfoTab(null);
 	}, [hoveredApp]);
 
 	// Once the panel's exit animation is over, shrink the click area back to the
@@ -1081,7 +1016,7 @@ const Dock = memo(function Dock() {
 			return () => clearTimeout(timer);
 		}
 
-		if (hoveredApp && !isDragging && !aiOpen) {
+		if (hoveredApp && !isDragging) {
 			const app = dockItems.find((a) => itemKey(a) === hoveredApp);
 			if (app && app.is_running && !app.is_background) {
 				const hwndsToCapture = app.all_hwnds || (app.hwnd ? [[app.hwnd, app.name]] : []);
@@ -1132,7 +1067,7 @@ const Dock = memo(function Dock() {
 		return () => {
 			if (previewTimerRef.current) clearTimeout(previewTimerRef.current);
 		};
-	}, [hoveredApp, isDragging, dockItems, aiOpen]);
+	}, [hoveredApp, isDragging, dockItems]);
 
 	const iconVariants = {
 		idle: { y: 0, scale: 1 },
@@ -1259,7 +1194,7 @@ const Dock = memo(function Dock() {
 								className="dock-reorder-container"
 							>
 								{infoCentre && (
-									<InfoLeft active={infoTab !== null && infoTab !== "controls" && infoTab !== "ai"} onOpen={() => openInfo(infoTab && infoTab !== "controls" ? infoTab : "media")} />
+									<InfoLeft active={infoTab !== null && infoTab !== "controls"} onOpen={() => openInfo(infoTab && infoTab !== "controls" ? infoTab : "media")} />
 								)}
 								{startItem && (
 									<motion.div
@@ -1656,18 +1591,6 @@ const Dock = memo(function Dock() {
 								{infoCentre && (
 									<InfoRight active={infoTab === "controls"} onOpen={() => openInfo("controls")} />
 								)}
-								{ai.enabled && (
-									<button
-										className="dock-ai-btn"
-										title={aiName}
-										onClick={(e) => {
-											e.stopPropagation();
-											invoke("ai_open").catch(() => {});
-										}}
-									>
-										<Sparkles size={16} strokeWidth={1.8} />
-									</button>
-								)}
 							</motion.div>
 						)}
 					</AnimatePresence>
@@ -1676,24 +1599,8 @@ const Dock = memo(function Dock() {
 							<div ref={infoPanelRef} className="ic-panel-anchor" key="info-panel">
 								<InfoPanel
 									tab={infoTab!}
-									setTab={pickTab}
+									setTab={setInfoTab}
 									onResize={() => updateRectRef.current()}
-									ai={
-										ai.enabled
-											? {
-													label: aiName,
-													height: aiHeight,
-													view: (
-														<AiPanel
-															ai={ai}
-															onClose={closeAi}
-															focusOnOpen={aiFocus}
-															onHeight={setAiHeight}
-														/>
-													)
-												}
-											: undefined
-									}
 								/>
 							</div>
 						)}
@@ -1999,7 +1906,7 @@ const Dock = memo(function Dock() {
 			<AnimatePresence>
 				{toast && (
 					<motion.div
-						className={toastInfo ? "dock-toast info" : "dock-toast"}
+						className="dock-toast"
 						initial={{ opacity: 0, y: 10 }}
 						animate={{ opacity: 1, y: 0 }}
 						exit={{ opacity: 0, y: 10 }}

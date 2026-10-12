@@ -1,7 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-#[cfg(windows)]
-mod ai;
 mod commands;
 mod connect;
 #[cfg(windows)]
@@ -227,39 +225,7 @@ fn main() {
             #[cfg(windows)]
             dock_extras::open_dock_extra,
             #[cfg(windows)]
-            dock_extras::eject_dock_extra,
-            #[cfg(windows)]
-            ai::ai_status,
-            #[cfg(windows)]
-            ai::ai_prompt,
-            #[cfg(windows)]
-            ai::ai_cancel,
-            #[cfg(windows)]
-            ai::ai_confirm,
-            #[cfg(windows)]
-            ai::ai_set_secret,
-            #[cfg(windows)]
-            ai::ai_send,
-            #[cfg(windows)]
-            ai::ai_reveal,
-            #[cfg(windows)]
-            ai::ai_enroll_sample,
-            #[cfg(windows)]
-            ai::ai_whatsapp_status,
-            #[cfg(windows)]
-            ai::ai_whatsapp_restart,
-            #[cfg(windows)]
-            ai::ai_whatsapp_pair_code,
-            #[cfg(windows)]
-            ai::ai_whatsapp_contacts,
-            #[cfg(windows)]
-            ai::ai_contacts,
-            #[cfg(windows)]
-            ai::ai_context,
-            #[cfg(windows)]
-            ai::ai_open,
-            #[cfg(windows)]
-            ai::ai_delete
+            dock_extras::eject_dock_extra
         ])
         .setup(|app| {
             init_taskbar_marker(app.handle());
@@ -267,9 +233,6 @@ fn main() {
             // invoke save_setting as soon as it loads, which happens before the
             // rest of this hook runs.
             crate::utils::init_settings_cache(app.handle());
-            // Bloom AI: arm the hotkey from settings; the agent itself starts on first use.
-            #[cfg(windows)]
-            crate::ai::init(app.handle());
             // Crash-recovery: if a previous session was force-killed while the native
             // taskbar was hidden, restore it now. Runs before the frontend re-hides it
             // (init_dock fires after a delay), so the flag must be removed first.

@@ -32,8 +32,6 @@ import { startDrag } from "@crabnebula/tauri-plugin-drag";
 import type { WidgetConfig } from "./components/StatusWidgetConfig";
 import { PowerModeIcon, powerModeLabel, usePowerMode } from "./powerMode";
 import { ConnectPage } from "./ConnectPage";
-import { AiPanel } from "./ai/AiPanel";
-import { useAi } from "./ai/useAi";
 import {
 	Cpu,
 	MemoryStick,
@@ -346,7 +344,7 @@ interface ShelfItem {
 	timestamp: number;
 }
 
-type BloomMode = "music" | "calendar" | "command-center" | "announcement" | "status" | "shelf" | "ai";
+type BloomMode = "music" | "calendar" | "command-center" | "announcement" | "status" | "shelf";
 
 // The shelf is a short-lived stash: one row, newest first, oldest evicted.
 const SHELF_MAX_ITEMS = 10;
@@ -579,8 +577,6 @@ function App() {
 	const [isVisible, setIsVisible] = useState(true);
 	const [isImpacted, setIsImpacted] = useState(false);
 	const [isExpanded, setIsExpanded] = useState(false);
-	// Bloom AI panel open in the notch: keeps a smart/peek notch on screen.
-	const [aiOpen, setAiOpen] = useState(false);
 	const [startupAnimating, setStartupAnimating] = useState(false);
 
 	const [dockMode, setDockMode] = useState(() => {
@@ -605,7 +601,6 @@ function App() {
 	const isAnyInteraction = isHovered || isNotchHovered || isEdgeHovered;
 	const isHidden =
 		!startupAnimating &&
-		!aiOpen &&
 		((notchMode === "smart" && isOverlapped && interactionState === "none") ||
 			(notchMode === "peek" && interactionState === "none" && !eventPeek));
 
@@ -1053,7 +1048,7 @@ function App() {
 		invoke("change_notch_mode", { mode: notchMode });
 	}, [notchMode, windowLabel]);
 
-	// Bloom mode state: 'music', 'calendar', 'command-center', 'announcement', 'shelf', 'status' or 'ai'
+	// Bloom mode state: 'music', 'calendar', 'command-center', 'announcement', 'shelf' or 'status'
 	const [bloomMode, setBloomMode] = useState<BloomMode>("status");
 
 	// Shelf: files and selected text stashed in the notch via drag-and-drop.
@@ -1433,8 +1428,7 @@ function App() {
 			console.info("[shelf] drag-enter:", event.payload.paths ?? event.payload.text);
 			setIsDragHovering(true);
 			setBloomMode((prev) => {
-				// An open AI panel keeps the notch; the drop still lands on the shelf.
-				if (prev === "announcement" || prev === "shelf" || prev === "ai") return prev;
+				if (prev === "announcement" || prev === "shelf") return prev;
 				shelfPrevModeRef.current = prev;
 				shelfDragActiveRef.current = true;
 				return "shelf";
@@ -1464,7 +1458,7 @@ function App() {
 			if (paths.length === 0 && !text) return;
 			if (paths.length > 0) addShelfItems(paths);
 			if (text) addShelfText(text);
-			setBloomMode((prev) => (prev === "announcement" || prev === "ai" ? prev : "shelf"));
+			setBloomMode((prev) => (prev === "announcement" ? prev : "shelf"));
 			collapseShelfSoon();
 		};
 
@@ -1496,45 +1490,14 @@ function App() {
 		};
 	}, []);
 
-	// Bloom AI: Bloom opens the panel here (hotkey or dock button) unless the
-	// notch is merged into the dock, where Dock.tsx shows it instead.
-	const [aiFocus, setAiFocus] = useState(false);
-	// The panel's natural height (AiPanel onHeight); the notch springs to it.
-	const [aiHeight, setAiHeight] = useState(0);
-	const ai = useAi((recording) => {
-		if (infoCentreRef.current) return;
-		setAiFocus(!recording);
-		setAiOpen(true);
-		setBloomMode("ai");
-	});
-	const closeAi = () => {
-		ai.stop();
-		ai.reset();
-		setAiOpen(false);
-		setBloomMode(mediaInfo.has_media && isPlaying ? "music" : "status");
-	};
-	// Turning AI off (or deleting it) closes an open panel.
-	useEffect(() => {
-		if (!ai.enabled && bloomMode === "ai") closeAi();
-	}, [ai.enabled, bloomMode]);
-	// A request waiting for an OK opens the panel: "Hey <name>" requests run in
-	// the overlay's orb, but approving needs the panel.
-	useEffect(() => {
-		if (!ai.state.confirm || !ai.enabled || infoCentreRef.current) return;
-		setAiOpen(true);
-		setBloomMode("ai");
-	}, [ai.state.confirm?.id]);
-
 	// Open the notch on an unseen announcement; stays open until dismissed.
 	useEffect(() => {
 		if (!announcement || announcementDismissed) return;
 		if (announcementShownRef.current === announcement.id) return;
-		// Wait for the AI panel to close; the effect re-runs then.
-		if (bloomMode === "ai") return;
 		announcementShownRef.current = announcement.id;
 		setBloomMode("announcement");
 		if (notchMode === "peek") triggerEventPeek(6000);
-	}, [announcement, announcementDismissed, notchMode, triggerEventPeek, bloomMode]);
+	}, [announcement, announcementDismissed, notchMode, triggerEventPeek]);
 
 	// Leave the announcement view once it is dismissed (or gone).
 	useEffect(() => {
@@ -1590,7 +1553,7 @@ function App() {
 	// wheel and the panel arrows; returns whether the panel changed.
 	const cycleBloomMode = (direction: 1 | -1) => {
 		// The announcement card is closed explicitly, not cycled away.
-		if (bloomMode === "announcement" || bloomMode === "ai") return false;
+		if (bloomMode === "announcement") return false;
 		const availableModes = getCyclableModes();
 		const currentIndex = availableModes.indexOf(bloomMode);
 		if (currentIndex === -1) return false;
@@ -1781,7 +1744,6 @@ function App() {
 			mediaInfo.has_media &&
 			isPlaying &&
 			bloomMode !== "calendar" &&
-			bloomMode !== "ai" &&
 			!announcementOpenRef.current &&
 			(isNewTrackWhilePlaying || justStartedPlaying)
 		) {
@@ -2279,7 +2241,7 @@ function App() {
 			resetTimer();
 			return;
 		}
-		if (!settingsCalendarEnabled || bloomMode === "ai") return;
+		if (!settingsCalendarEnabled) return;
 
 		setBloomMode((prev) => {
 			if (prev === "calendar") {
@@ -2364,7 +2326,6 @@ function App() {
 
 	// Calculate width dynamically based on enabled features
 	const getDynamicWidth = () => {
-		if (bloomMode === "ai") return 420;
 		if (bloomMode === "announcement" && announcement && !announcementDismissed) return 380;
 		if (isCalendarMode) return 480;
 		if (bloomMode === "shelf") return 380;
@@ -2394,10 +2355,6 @@ function App() {
 		if (!isExpanded || !isVisible || isHidden) {
 			return isImpacted ? 28.9 : 44.2;
 		}
-		// The 36px status row, .ai-notch-content's 12px padding top and bottom,
-		// and the panel's measured height, up to 360px (the window is 420px).
-		// Past that the reply scrolls; the input row stays in view.
-		if (bloomMode === "ai") return Math.min(360, 36 + 24 + (aiHeight || 66));
 		// Announcement card: body is line-clamped, so a fixed size fits both cases.
 		if (bloomMode === "announcement" && announcement && !announcementDismissed) {
 			return announcement.url ? 168 : 148;
@@ -2427,7 +2384,6 @@ function App() {
 		isHovered &&
 		notchClicked &&
 		bloomMode !== "announcement" &&
-		bloomMode !== "ai" &&
 		getCyclableModes().length > 1;
 
 	// Close compact media player expansions when notch is unhovered or mode changes
@@ -2508,12 +2464,12 @@ function App() {
 					onClickCapture={() => setNotchClicked(true)}
 					onHoverStart={() => {
 						setIsHovered(true);
-						// Shelf, announcement and the AI panel manage their own lifetime — hovering
+						// Shelf and announcement manage their own lifetime — hovering
 						// must not yank the island out from under them. Hovering the
 						// shelf also cancels its post-drop auto-close.
 						if (bloomMode === "shelf") {
 							clearShelfCollapse();
-						} else if (bloomMode !== "announcement" && bloomMode !== "ai") {
+						} else if (bloomMode !== "announcement") {
 							setBloomMode(mediaInfo.has_media && isPlaying ? "music" : "status");
 						}
 					}}
@@ -3415,27 +3371,6 @@ function App() {
 													Learn more
 												</button>
 											)}
-										</motion.div>
-									)}
-								</AnimatePresence>
-
-								{/* Bloom AI */}
-								<AnimatePresence>
-									{bloomMode === "ai" && (
-										<motion.div
-											className="ai-notch-content"
-											onClick={(e) => e.stopPropagation()}
-											initial={{ opacity: 0 }}
-											animate={{ opacity: 1 }}
-											exit={{ opacity: 0, filter: "blur(4px)", transition: { duration: 0.1 } }}
-											transition={{ type: "spring", stiffness: 400, damping: 30 }}
-										>
-											<AiPanel
-												ai={ai}
-												onClose={closeAi}
-												focusOnOpen={aiFocus}
-												onHeight={setAiHeight}
-											/>
 										</motion.div>
 									)}
 								</AnimatePresence>

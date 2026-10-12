@@ -57,8 +57,7 @@ function TileMore({ title, onOpen }: { title: string; onOpen: () => void }) {
 	);
 }
 
-/** "ai" is Bloom AI's view: a tab of this panel when AI is on (Dock.tsx). */
-export type InfoTab = "media" | "calendar" | "timer" | "controls" | "shelf" | "ai";
+export type InfoTab = "media" | "calendar" | "timer" | "controls" | "shelf";
 
 const TABS: [InfoTab, string][] = [
 	["media", "Now playing"],
@@ -397,39 +396,17 @@ interface PanelProps {
 	setTab: (tab: InfoTab) => void;
 	/** Called whenever the panel's box changes, so the dock's click area follows. */
 	onResize: () => void;
-	/** Bloom AI's tab, last in the row; absent while AI is off. `height` is
-	 *  its view's natural height: the panel grows to fit it. */
-	ai?: { label: string; view: ReactNode; height: number };
 }
 
-// Every tab is 300px tall; the AI tab grows with Janice's reply up to 400px
-// (the dock window is 600px, and bloom-scale enlarges both), then scrolls.
+// Every tab is 300px tall.
 const PANEL_HEIGHT = 300;
-const AI_MAX_HEIGHT = 400;
-const HEIGHT_SPRING = { type: "spring", stiffness: 450, damping: 29 } as const;
 
-export function InfoPanel({ tab, setTab, onResize, ai }: PanelProps) {
-	const tabs: [InfoTab, string][] = ai ? [...TABS, ["ai", ai.label]] : TABS;
+export function InfoPanel({ tab, setTab, onResize }: PanelProps) {
 	const ref = useRef<HTMLDivElement>(null);
-	const viewRef = useRef<HTMLDivElement>(null);
-	// Padding, tabs and gap around the view, measured once laid out.
-	const [chrome, setChrome] = useState(68);
-	const height =
-		tab === "ai" && ai?.height
-			? Math.min(AI_MAX_HEIGHT, Math.max(PANEL_HEIGHT, ai.height + chrome))
-			: PANEL_HEIGHT;
 	useEffect(() => {
 		if (!ref.current) return;
-		const measureChrome = () => {
-			if (ref.current && viewRef.current)
-				setChrome(ref.current.offsetHeight - viewRef.current.offsetHeight);
-		};
-		const observer = new ResizeObserver(() => {
-			measureChrome();
-			onResize();
-		});
+		const observer = new ResizeObserver(onResize);
 		observer.observe(ref.current);
-		measureChrome();
 		onResize();
 		return () => {
 			observer.disconnect();
@@ -438,10 +415,10 @@ export function InfoPanel({ tab, setTab, onResize, ai }: PanelProps) {
 	}, []);
 
 	// Direction of the last switch (+1 forward, -1 back), read by the slide variants.
-	// A switch made outside (the AI hotkey) gets its direction here too.
+	// A switch made outside (a shelf drop) gets its direction here too.
 	const dir = useRef(1);
 	const shown = useRef(tab);
-	const index = (t: InfoTab) => tabs.findIndex(([id]) => id === t);
+	const index = (t: InfoTab) => TABS.findIndex(([id]) => id === t);
 	if (shown.current !== tab) {
 		dir.current = Math.sign(index(tab) - index(shown.current)) || 1;
 		shown.current = tab;
@@ -454,10 +431,9 @@ export function InfoPanel({ tab, setTab, onResize, ai }: PanelProps) {
 	};
 
 	// Scrolling over the panel cycles tabs, as it cycles modes on the notch.
-	// Like the notch, the AI view is left with its close button, not a scroll.
 	const lastWheel = useRef(0);
 	const onWheel = (e: React.WheelEvent) => {
-		if (tab === "ai" || (e.target as HTMLElement).closest("input")) return;
+		if ((e.target as HTMLElement).closest("input")) return;
 		const now = Date.now();
 		const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
 		if (now - lastWheel.current < 250 || Math.abs(delta) < 5) return;
@@ -471,17 +447,17 @@ export function InfoPanel({ tab, setTab, onResize, ai }: PanelProps) {
 			ref={ref}
 			className="ic-panel"
 			// Unrolls upward out of the bar, and rolls back into it on close.
-			initial={{ clipPath: "inset(100% 0% 0% 0% round 18px 18px 0px 0px)", opacity: 0.4, height }}
-			animate={{ clipPath: "inset(0% 0% 0% 0% round 18px 18px 0px 0px)", opacity: 1, height }}
+			initial={{ clipPath: "inset(100% 0% 0% 0% round 18px 18px 0px 0px)", opacity: 0.4, height: PANEL_HEIGHT }}
+			animate={{ clipPath: "inset(0% 0% 0% 0% round 18px 18px 0px 0px)", opacity: 1, height: PANEL_HEIGHT }}
 			exit={{ clipPath: "inset(100% 0% 0% 0% round 18px 18px 0px 0px)", opacity: 0.4 }}
-			transition={{ type: "spring", stiffness: 300, damping: 32, height: HEIGHT_SPRING }}
+			transition={{ type: "spring", stiffness: 300, damping: 32 }}
 			onAnimationComplete={onResize}
 			onWheel={onWheel}
 			onClick={(e) => e.stopPropagation()}
 			onContextMenu={(e) => e.stopPropagation()}
 		>
 			<div className="ic-tabs">
-				{tabs.map(([id, label]) => (
+				{TABS.map(([id, label]) => (
 					<button key={id} className={`ic-tab ${tab === id ? "on" : ""}`} onClick={() => go(id)}>
 						{tab === id && (
 							<motion.span
@@ -494,7 +470,7 @@ export function InfoPanel({ tab, setTab, onResize, ai }: PanelProps) {
 					</button>
 				))}
 			</div>
-			<div ref={viewRef} className="ic-view">
+			<div className="ic-view">
 				<AnimatePresence mode="popLayout" initial={false} custom={dir.current}>
 					<motion.div
 						key={tab}
@@ -511,7 +487,6 @@ export function InfoPanel({ tab, setTab, onResize, ai }: PanelProps) {
 						{tab === "timer" && <TimerView />}
 						{tab === "controls" && <ControlsView />}
 						{tab === "shelf" && <ShelfView />}
-						{tab === "ai" && ai?.view}
 					</motion.div>
 				</AnimatePresence>
 			</div>

@@ -6,6 +6,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
 	Bluetooth,
 	ChevronLeft,
@@ -22,8 +23,16 @@ import {
 	WifiLow,
 	WifiZero
 } from "lucide-react";
-import { takeKeyboard } from "./ai/AiPanel";
 import "./ConnectPage.css";
+
+/** The notch and dock are no-activate windows: take the keyboard, then focus. */
+function takeKeyboard(el: HTMLElement | null) {
+	if (!el) return;
+	getCurrentWindow()
+		.setFocus()
+		.catch(() => {})
+		.finally(() => el.focus());
+}
 
 interface WifiNetwork {
 	ssid: string;

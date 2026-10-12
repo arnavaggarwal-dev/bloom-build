@@ -1,5 +1,5 @@
 name: cloud-build
-# Builds Bloom and its bloom-ai sidecar on every push; install-cloud.bat downloads the result.
+# Builds Bloom on every push; install-cloud.bat downloads the result.
 on:
   push:
     branches: [main]
@@ -20,12 +20,10 @@ jobs:
         with:
           workspaces: src-tauri
       - run: bun install --frozen-lockfile
-      - run: bun run ai:build
       - run: bun run tauri build --no-bundle
+      - run: git diff --exit-code -- src-tauri/Cargo.lock
       - uses: actions/upload-artifact@v4
         with:
           name: bloom-windows
           retention-days: 14
-          path: |
-            src-tauri/target/release/bloom.exe
-            src-tauri/target/release/bloom-ai.exe
+          path: src-tauri/target/release/bloom.exe

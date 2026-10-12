@@ -51,10 +51,6 @@ static WIN_KEY_DOWN: AtomicBool = AtomicBool::new(false);
 /// auto-repeat re-fires the keydown; only the first press may toggle an app.
 #[cfg(windows)]
 static WIN_NUMBER_HELD: AtomicU8 = AtomicU8::new(0);
-/// Whether the Bloom AI push-to-talk key is held. Key auto-repeat re-sends the
-/// keydown; only the first one starts a recording.
-#[cfg(windows)]
-static AI_KEY_HELD: AtomicBool = AtomicBool::new(false);
 /// Virtual key Microsoft documents as "unassigned", used as the mask key.
 /// See `send_start_menu_mask`.
 #[cfg(windows)]
@@ -64,22 +60,19 @@ const MASK_VK: u16 = 0xE8;
 #[cfg(windows)]
 static KEYBOARD_HOOK: AtomicIsize = AtomicIsize::new(0);
 
-/// Win+1-9 and the Bloom AI push-to-talk key are the only features that need a
-/// global keyboard hook: Explorer already registers Win+1-9, so `RegisterHotKey`
-/// can't claim them, and push-to-talk needs the key's release and must swallow
-/// it. Volume and brightness keys are left to Windows, and Bloom's overlays
-/// follow the resulting changes instead. The hook only exists while one of
-/// those is in use (the dock replaces the taskbar with Win+1-9 on, or AI is on
-/// with a hotkey); the rest of the time Bloom doesn't see the keyboard at all.
+/// Win+1-9 is the only feature that needs a global keyboard hook: Explorer
+/// already registers those hotkeys, so `RegisterHotKey` can't claim them.
+/// Volume and brightness keys are left to Windows, and Bloom's overlays follow
+/// the resulting changes instead. The hook only exists while Win+1-9 is in use
+/// (the dock replaces the taskbar and the setting is on); the rest of the time
+/// Bloom doesn't see the keyboard at all.
 #[cfg(windows)]
 pub fn setup_keyboard_hook(app_handle: AppHandle) {
     let _ = KEYBOARD_HOOK_APP_HANDLE.set(app_handle.clone());
     std::thread::spawn(move || {
         // Exiting removes the hook with the process; never touch it mid-shutdown.
         while !SHUTTING_DOWN.load(Ordering::Relaxed) {
-            let wanted = (NATIVE_TASKBAR_HIDDEN.load(Ordering::Relaxed)
-                && dock_win_number_enabled())
-                || crate::ai::HOTKEY_VK.load(Ordering::Relaxed) != 0;
+            let wanted = NATIVE_TASKBAR_HIDDEN.load(Ordering::Relaxed) && dock_win_number_enabled();
             if wanted != (KEYBOARD_HOOK.load(Ordering::Relaxed) != 0) {
                 // A low-level hook runs on the thread that installed it, which
                 // needs a message loop, so install and remove it on the main thread.
@@ -104,10 +97,6 @@ fn set_keyboard_hook(enabled: bool) {
             KEYBOARD_HOOK.store(0, Ordering::Relaxed);
             WIN_KEY_DOWN.store(false, Ordering::Relaxed);
             WIN_NUMBER_HELD.store(0, Ordering::Relaxed);
-            // The release of a held push-to-talk key will never arrive now.
-            if AI_KEY_HELD.swap(false, Ordering::Relaxed) {
-                crate::ai::hotkey_event(false);
-            }
         }
     }
 }
@@ -223,18 +212,6 @@ unsafe extern "system" fn keyboard_hook_proc(
         let vk_code = VIRTUAL_KEY(kb.vkCode as u16);
         let is_down = wparam.0 == WM_KEYDOWN as usize || wparam.0 == WM_SYSKEYDOWN as usize;
         let is_up = wparam.0 == WM_KEYUP as usize || wparam.0 == WM_SYSKEYUP as usize;
-
-        // Bloom AI push-to-talk (Settings > AI). The key is swallowed so it
-        // never reaches the focused app. HOTKEY_VK is 0 while AI is off.
-        let ai_vk = crate::ai::HOTKEY_VK.load(Ordering::Relaxed);
-        if ai_vk != 0 && kb.vkCode == ai_vk && (kb.flags.0 & LLKHF_INJECTED.0) == 0 {
-            if is_down && !AI_KEY_HELD.swap(true, Ordering::Relaxed) {
-                crate::ai::hotkey_event(true);
-            } else if is_up && AI_KEY_HELD.swap(false, Ordering::Relaxed) {
-                crate::ai::hotkey_event(false);
-            }
-            return windows::Win32::Foundation::LRESULT(1);
-        }
 
         // Only physical presses drive the Win+Number replacement; injected
         // events (our own Start taps and mask key) must not re-enter it.
@@ -3071,8 +3048,7 @@ pub(crate) fn handle_mouse_move(app_handle: &AppHandle, cursor: Cursor, now: i64
         } else {
             // The overlay applies `bloom-scale` as CSS zoom, so the cards
             // are larger than 42x196 CSS px for non-default scales. The edge
-            // rects only count while a HUD card is up: the overlay also shows
-            // the AI orb, which must never catch clicks.
+            // rects only count while a HUD card is up.
             let bloom_scale = crate::utils::get_bloom_scale(app_handle);
             let hud_up = crate::state::OVERLAY_HUD_UP.load(Ordering::Relaxed);
             let over_left = in_mixer
