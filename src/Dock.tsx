@@ -821,6 +821,8 @@ const Dock = memo(function Dock() {
 		const fallback = { x: e.clientX, y: e.clientY, app };
 		closeMenu();
 		setPreviewData(null);
+		// The menu takes the button release, which would leave the icon pressed.
+		setPressedApp(null);
 		try {
 			const action = await invoke<string>("show_app_menu", {
 				name: app.name,

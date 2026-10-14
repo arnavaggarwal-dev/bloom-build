@@ -4509,7 +4509,7 @@ pub async fn show_app_menu(name: String, path: String, hwnds: Vec<isize>, pinned
         }
         let _ = DestroyMenu(menu);
 
-        match cmd {
+        let action = match cmd {
             1 => "launch",
             2 => "pin",
             3 => "close",
@@ -4535,8 +4535,8 @@ pub async fn show_app_menu(name: String, path: String, hwnds: Vec<isize>, pinned
                 ""
             }
             _ => "",
-        }
-        .to_string()
+        };
+        action.to_string()
     })
     .await
     .unwrap_or_default()
