@@ -1,5 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(windows)]
+mod bluetooth;
+#[cfg(windows)]
+mod cava;
 mod commands;
 mod connect;
 #[cfg(windows)]
@@ -10,12 +14,15 @@ mod linux;
 mod services;
 #[cfg(windows)]
 mod shelf;
+mod shelf_preview;
 mod state;
 #[cfg(windows)]
 mod tray;
 mod types;
 mod updater;
 mod utils;
+#[cfg(windows)]
+mod wifi;
 
 use std::sync::atomic::Ordering;
 use tauri::Manager;
@@ -198,8 +205,8 @@ fn main() {
             get_bluetooth_state,
             set_bluetooth_state,
             connect::wifi_networks,
-            connect::wifi_connect,
-            connect::wifi_disconnect,
+            connect::wifi_join,
+            connect::wifi_leave,
             connect::bt_watch,
             connect::bt_unwatch,
             connect::bt_pair,
@@ -229,7 +236,31 @@ fn main() {
             #[cfg(windows)]
             dock_extras::open_dock_extra,
             #[cfg(windows)]
-            dock_extras::eject_dock_extra
+            dock_extras::eject_dock_extra,
+            #[cfg(windows)]
+            wifi::wifi_list_networks,
+            #[cfg(windows)]
+            wifi::wifi_scan,
+            #[cfg(windows)]
+            wifi::wifi_connect,
+            #[cfg(windows)]
+            wifi::wifi_disconnect,
+            #[cfg(windows)]
+            wifi::wifi_forget,
+            #[cfg(windows)]
+            wifi::wifi_open_settings,
+            #[cfg(windows)]
+            bluetooth::bluetooth_list_devices,
+            #[cfg(windows)]
+            bluetooth::bluetooth_set_connected,
+            #[cfg(windows)]
+            bluetooth::bluetooth_discovery,
+            #[cfg(windows)]
+            bluetooth::bluetooth_pair,
+            #[cfg(windows)]
+            bluetooth::bluetooth_pairing_respond,
+            #[cfg(windows)]
+            bluetooth::bluetooth_unpair
         ])
         .setup(|app| {
             init_taskbar_marker(app.handle());
@@ -375,6 +406,10 @@ fn main() {
             setup_taskbar_hook();
             setup_audio_visualization(app.handle().clone());
             setup_settings_watcher(app.handle().clone());
+            #[cfg(windows)]
+            wifi::setup_wifi_notifications(app.handle().clone());
+            #[cfg(windows)]
+            bluetooth::setup_bluetooth_notifications(app.handle().clone());
 
             // Listen for second-instance signal to open settings
             #[cfg(target_os = "linux")]

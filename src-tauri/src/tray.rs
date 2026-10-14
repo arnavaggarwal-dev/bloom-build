@@ -2,10 +2,10 @@
 //! candidates: Shell_NotifyIconGetRect must confirm each icon before it is used.
 use serde::Serialize;
 use std::collections::HashMap;
-use windows::core::{w, Interface, GUID, PCWSTR};
+use windows::core::{w, Interface, BOOL, GUID, PCWSTR};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::{
-    Foundation::{HWND, LPARAM, RECT},
+    Foundation::{HWND, LPARAM, POINT, RECT},
     System::{Com::*, Registry::*},
     UI::{Accessibility::*, Shell::*, WindowsAndMessaging::*},
 };
@@ -230,7 +230,7 @@ pub fn enumerate() -> Vec<TrayApp> {
             let app = apps
                 .entry(icon.path.to_lowercase())
                 .or_insert_with(|| TrayApp {
-                    name: crate::commands::friendly_process_name(&icon.path),
+                    name: crate::commands::app_display_name(&icon.path, None),
                     window_handles: windows
                         .iter()
                         .filter(|(_, p)| p.eq_ignore_ascii_case(&icon.path))
@@ -553,32 +553,35 @@ unsafe fn find_overflow_icon(
             buttons.push(element);
         }
     }
+    // A button whose label names the target app, and only that one, is the
+    // most direct identity: it holds even when Explorer's registry order is
+    // stale or some icons can't be attributed to a process, so positions
+    // don't line up. Only when no single label decides does order count.
+    let labelled: Vec<_> = buttons
+        .iter()
+        .filter(|button| {
+            let label = button.CurrentName().unwrap_or_default().to_string();
+            matches_icon_label(&label, target)
+                && !hidden
+                    .iter()
+                    .any(|icon| icon.key != target.key && matches_icon_label(&label, icon))
+        })
+        .collect();
+    if let [button] = labelled[..] {
+        return button.cast().map_err(|e| e.to_string());
+    }
     if buttons.len() != hidden.len() {
-        // Some overflow icons can't be attributed to a process Bloom can read,
-        // so positions don't line up. Fall back to the button whose label
-        // names the target app, but only when exactly one does and it names
-        // no other known icon; otherwise opening a menu could hit another app.
-        let labelled: Vec<_> = buttons
-            .iter()
-            .filter(|button| {
-                let label = button.CurrentName().unwrap_or_default().to_string();
-                matches_icon_label(&label, target)
-                    && !hidden
-                        .iter()
-                        .any(|icon| icon.key != target.key && matches_icon_label(&label, icon))
-            })
-            .collect();
-        if let [button] = labelled[..] {
-            return button.cast().map_err(|e| e.to_string());
-        }
-        return Err("Windows tray icons changed while opening the menu. Please try again.".into());
+        return Err("Windows could not tell this app's tray icon apart. Open it from the system tray.".into());
     }
     // Name matches provide cross-checks of Explorer's ordered UI tree, but
     // cannot be required for every icon because tooltip text is app-defined.
+    // An icon without a name (an app with no tooltip, or one that just
+    // re-registered after Explorer restarted) simply can't be cross-checked;
+    // it must not block the icon the user clicked.
     for (button_index, button) in buttons.iter().enumerate() {
         let label = button.CurrentName().unwrap_or_default().to_string();
         if label.trim().is_empty() {
-            return Err("Windows returned an unnamed tray icon. Please try again.".into());
+            continue;
         }
         let matches: Vec<_> = hidden
             .iter()
@@ -647,20 +650,81 @@ unsafe fn find_promoted_icon(
             matches.push(element);
         }
     }
+    // The icon's position already identifies exactly one button, so it's
+    // used even when its app set no tooltip for it.
     if matches.len() != 1 {
         return Err("Windows could not identify this app's tray icon.".into());
     }
-    let button = matches.remove(0);
-    if button
-        .CurrentName()
-        .unwrap_or_default()
-        .to_string()
-        .trim()
-        .is_empty()
-    {
-        return Err("Windows returned an unnamed tray icon. Please try again.".into());
+    matches.remove(0).cast().map_err(|e| e.to_string())
+}
+
+/// Visible top-level windows.
+unsafe fn visible_windows() -> Vec<HWND> {
+    unsafe extern "system" fn collect(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let windows = unsafe { &mut *(lparam.0 as *mut Vec<HWND>) };
+        if unsafe { IsWindowVisible(hwnd) }.as_bool() {
+            windows.push(hwnd);
+        }
+        BOOL(1)
     }
-    button.cast().map_err(|e| e.to_string())
+    let mut windows = Vec::new();
+    let _ = EnumWindows(Some(collect), LPARAM(&mut windows as *mut _ as isize));
+    windows
+}
+
+/// Apps open their tray menu at their notification icon, which stays in the
+/// hidden taskbar's corner while Bloom replaces the taskbar. Waits briefly for
+/// the menu the app opens and moves it to `anchor` (the dock icon that was
+/// clicked), above the pointer and kept on that monitor. The menu is found by
+/// its process's executable: many icons are identified by GUID and carry no
+/// window to take the process from.
+unsafe fn move_new_menu_to(app_path: &str, before: &[HWND], anchor: POINT) {
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1200);
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        let Some(menu) = visible_windows().into_iter().find(|hwnd| {
+            if before.contains(hwnd) {
+                return false;
+            }
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(*hwnd, Some(&mut pid));
+            crate::commands::process_image_path(pid)
+                .is_some_and(|path| path.eq_ignore_ascii_case(app_path))
+        }) else {
+            continue;
+        };
+        let mut rect = RECT::default();
+        if GetWindowRect(menu, &mut rect).is_err() {
+            return;
+        }
+        let (width, height) = (rect.right - rect.left, rect.bottom - rect.top);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        let monitor = MonitorFromPoint(anchor, MONITOR_DEFAULTTONEAREST);
+        if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+            return;
+        }
+        let area = info.rcMonitor;
+        let x = anchor
+            .x
+            .clamp(area.left, (area.right - width).max(area.left));
+        let y = (anchor.y - height).clamp(area.top, (area.bottom - height).max(area.top));
+        let _ = SetWindowPos(
+            menu,
+            None,
+            x,
+            y,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+        return;
+    }
 }
 
 pub fn interact(key: &str, context_menu: bool) -> Result<(), String> {
@@ -684,14 +748,30 @@ pub fn interact(key: &str, context_menu: bool) -> Result<(), String> {
             find_promoted_icon(&automation, icon)?
         } else {
             exposure.expose_overflow(&automation)?;
-            find_overflow_icon(&automation, &icons, icon)?
+            // The overflow's tree fills in over a few frames after it opens;
+            // an early read sees too few buttons, so give it a moment.
+            let mut found = find_overflow_icon(&automation, &icons, icon);
+            for _ in 0..4 {
+                if found.is_ok() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(60));
+                found = find_overflow_icon(&automation, &icons, icon);
+            }
+            found?
         };
         Shell_NotifyIconGetRect(&icon.identifier)
             .map_err(|_| "This tray icon is no longer running.")?;
         if context_menu {
+            // The pointer is on the dock icon that was right-clicked.
+            let mut cursor = POINT::default();
+            let _ = GetCursorPos(&mut cursor);
+            let before = visible_windows();
             element
                 .ShowContextMenu()
-                .map_err(|_| "Windows could not open this app's native tray menu.".to_string())
+                .map_err(|_| "Windows could not open this app's native tray menu.".to_string())?;
+            move_new_menu_to(&icon.path, &before, cursor);
+            Ok(())
         } else {
             let element: IUIAutomationElement = element.cast().map_err(|e| e.to_string())?;
             let pattern = element

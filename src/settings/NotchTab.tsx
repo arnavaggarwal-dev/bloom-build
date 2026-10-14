@@ -12,7 +12,12 @@ import {
 	Timer,
 	Archive,
 	X,
-	SlidersHorizontal
+	SlidersHorizontal,
+	ChevronUp,
+	ChevronDown,
+	Gauge,
+	AudioLines,
+	Palette
 } from "lucide-react";
 import { useState } from "react";
 import { SettingRow } from "./SettingRow";
@@ -29,6 +34,10 @@ interface NotchTabProps {
 	handleNotchEdgeDelayChange: (val: number) => void;
 	calendarEnabled: boolean;
 	toggleCalendar: () => void;
+	notchRememberPanel: boolean;
+	toggleNotchRememberPanel: () => void;
+	notchDefaultPanel: "calendar" | "command-center";
+	changeNotchDefaultPanel: (panel: "calendar" | "command-center") => void;
 	timerSoundEnabled: boolean;
 	toggleTimerSound: () => void;
 	musicModeEnabled: boolean;
@@ -72,6 +81,10 @@ export function NotchTab({
 	handleNotchEdgeDelayChange,
 	calendarEnabled,
 	toggleCalendar,
+	notchRememberPanel,
+	toggleNotchRememberPanel,
+	notchDefaultPanel,
+	changeNotchDefaultPanel,
 	timerSoundEnabled,
 	toggleTimerSound,
 	musicModeEnabled,
@@ -150,6 +163,32 @@ export function NotchTab({
 					</SettingRow>
 				)}
 
+				<SettingRow
+					icon={PanelTop}
+					label="Remember Last Panel"
+					desc="Reopen the panel you last used; turn off to choose a fixed default"
+				>
+					<label className="toggle-switch">
+						<input type="checkbox" checked={notchRememberPanel} onChange={toggleNotchRememberPanel} />
+						<span className="slider"></span>
+					</label>
+				</SettingRow>
+
+				{!notchRememberPanel && (
+					<SettingRow icon={PanelTop} label="Default Panel" desc="Open this panel when you click the notch">
+						<select
+							className="settings-select"
+							value={calendarEnabled ? notchDefaultPanel : "command-center"}
+							onChange={(e) =>
+								changeNotchDefaultPanel(e.target.value as "calendar" | "command-center")
+							}
+						>
+							<option value="calendar" disabled={!calendarEnabled}>Calendar</option>
+							<option value="command-center">Command Center</option>
+						</select>
+					</SettingRow>
+				)}
+
 				<SettingRow icon={Calendar} label="Calendar & Timer" desc="Enable productivity split-view">
 					<label className="toggle-switch">
 						<input type="checkbox" checked={calendarEnabled} onChange={toggleCalendar} />
@@ -176,6 +215,8 @@ export function NotchTab({
 						<span className="slider"></span>
 					</label>
 				</SettingRow>
+
+				<VisualizerRows />
 
 				{musicModeEnabled && (
 					<>
@@ -338,39 +379,124 @@ export function NotchTab({
 }
 
 // The merged info centre's tabs: each can be hidden except Controls, which
-// always stays (power, Wi-Fi, volume...). Read by InfoCentre.tsx's InfoPanel.
+// always stays (power, Wi-Fi, volume...), and all can be reordered. Read by
+// InfoCentre.tsx's InfoPanel; a tab missing from the order keeps its default place.
 const HIDDEN_TABS_KEY = "bloom-ic-hidden-tabs";
+const ORDER_KEY = "bloom-ic-tab-order";
+const STRETCH_KEY = "bloom-ic-stretch-ms";
 const INFO_TABS = [
 	{ id: "media", label: "Now Playing", icon: Music },
 	{ id: "calendar", label: "Calendar", icon: Calendar },
 	{ id: "timer", label: "Timer", icon: Timer },
-	{ id: "shelf", label: "Shelf", icon: Archive }
+	{ id: "shelf", label: "Shelf", icon: Archive },
+	{ id: "controls", label: "Controls", icon: SlidersHorizontal }
 ];
+const readList = (key: string) => (localStorage.getItem(key) ?? "").split(",").filter(Boolean);
 
 function InfoTabRows() {
-	const [hidden, setHidden] = useState(() =>
-		(localStorage.getItem(HIDDEN_TABS_KEY) ?? "").split(",").filter(Boolean)
-	);
+	const [hidden, setHidden] = useState(() => readList(HIDDEN_TABS_KEY));
+	const [order, setOrder] = useState(() => {
+		const saved = readList(ORDER_KEY);
+		return [...saved, ...INFO_TABS.map((t) => t.id).filter((id) => !saved.includes(id))];
+	});
 	const toggle = (id: string) => {
 		const next = hidden.includes(id) ? hidden.filter((t) => t !== id) : [...hidden, id];
 		setHidden(next);
 		saveSetting(HIDDEN_TABS_KEY, next.join(","));
 	};
+	// How long the panel takes to stretch up out of the bar (Dock.tsx).
+	const [stretchMs, setStretchMs] = useState(() => Number(localStorage.getItem(STRETCH_KEY)) || 400);
+	const move = (i: number, by: number) => {
+		const next = [...order];
+		[next[i], next[i + by]] = [next[i + by], next[i]];
+		setOrder(next);
+		saveSetting(ORDER_KEY, next.join(","));
+	};
 	return (
 		<>
-			{INFO_TABS.map(({ id, label, icon }) => (
-				<SettingRow key={id} icon={icon} label={`${label} Tab`} desc="Show this tab in the info centre">
-					<label className="toggle-switch">
-						<input type="checkbox" checked={!hidden.includes(id)} onChange={() => toggle(id)} />
-						<span className="slider"></span>
-					</label>
-				</SettingRow>
-			))}
-			<SettingRow icon={SlidersHorizontal} label="Controls Tab" desc="Always shown">
-				<label className="toggle-switch">
-					<input type="checkbox" checked disabled />
-					<span className="slider"></span>
-				</label>
+			<SettingRow icon={Gauge} label="Panel Speed" desc={`The panel stretches open in ${stretchMs}ms`}>
+				<input
+					type="range"
+					min="150"
+					max="900"
+					step="50"
+					value={stretchMs}
+					onChange={(e) => {
+						setStretchMs(parseInt(e.target.value));
+						saveSetting(STRETCH_KEY, e.target.value);
+					}}
+					className="settings-slider"
+				/>
+			</SettingRow>
+			{order.map((id, i) => {
+				const tab = INFO_TABS.find((t) => t.id === id);
+				if (!tab) return null;
+				const locked = id === "controls";
+				return (
+					<SettingRow
+						key={id}
+						icon={tab.icon}
+						label={`${tab.label} Tab`}
+						desc={locked ? "Always shown; can be moved" : "Show this tab in the info centre"}
+					>
+						<div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+							<button className="scale-adjust-btn" title="Move left" disabled={i === 0} onClick={() => move(i, -1)}>
+								<ChevronUp size={14} />
+							</button>
+							<button className="scale-adjust-btn" title="Move right" disabled={i === order.length - 1} onClick={() => move(i, 1)}>
+								<ChevronDown size={14} />
+							</button>
+							<label className="toggle-switch">
+								<input
+									type="checkbox"
+									checked={locked || !hidden.includes(id)}
+									disabled={locked}
+									onChange={() => toggle(id)}
+								/>
+								<span className="slider"></span>
+							</label>
+						</div>
+					</SettingRow>
+				);
+			})}
+		</>
+	);
+}
+
+// The audio visualizer's look (Visualizer.tsx), for the notch and the merged
+// dock alike: Kurve-style bars, wave or blocks; rainbow, smooth or mono.
+function VisualizerRows() {
+	const [style, setStyle] = useState(() => localStorage.getItem("bloom-viz-style") || "wave");
+	const [color, setColor] = useState(() => localStorage.getItem("bloom-viz-color") || "rainbow");
+	return (
+		<>
+			<SettingRow icon={AudioLines} label="Visualizer Style" desc="How the audio visualizer draws the music">
+				<select
+					className="settings-select"
+					value={style}
+					onChange={(e) => {
+						setStyle(e.target.value);
+						saveSetting("bloom-viz-style", e.target.value);
+					}}
+				>
+					<option value="wave">Wave</option>
+					<option value="bars">Bars</option>
+					<option value="blocks">Blocks</option>
+				</select>
+			</SettingRow>
+			<SettingRow icon={Palette} label="Visualizer Colour" desc="Rainbow drifts through every hue; smooth glides around your accent">
+				<select
+					className="settings-select"
+					value={color}
+					onChange={(e) => {
+						setColor(e.target.value);
+						saveSetting("bloom-viz-color", e.target.value);
+					}}
+				>
+					<option value="rainbow">Rainbow</option>
+					<option value="smooth">Smooth</option>
+					<option value="mono">Mono</option>
+				</select>
 			</SettingRow>
 		</>
 	);

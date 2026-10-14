@@ -3,7 +3,7 @@
 // devices, answering their PIN prompts; connect, disconnect or forget paired
 // ones. Backed by src-tauri/src/connect.rs.
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -56,35 +56,41 @@ interface Props {
 	enabled: boolean;
 	onToggle: () => void;
 	onBack: () => void;
+	/** Told while a password or PIN field is open, so the notch stays open. */
+	onPinChange?: (pinned: boolean) => void;
 }
+
+const PinContext = createContext<((pinned: boolean) => void) | undefined>(undefined);
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const message = (e: unknown) => (typeof e === "string" ? e : "Something went wrong.");
 
-export function ConnectPage({ kind, enabled, onToggle, onBack }: Props) {
+export function ConnectPage({ kind, enabled, onToggle, onBack, onPinChange }: Props) {
 	return (
-		<div className="cp" onClick={(e) => e.stopPropagation()} onWheel={(e) => e.stopPropagation()}>
-			<div className="cp-head">
-				<button className="cp-back" onClick={onBack} title="Back">
-					<ChevronLeft size={16} />
-				</button>
-				<span className="cp-title">{kind === "wifi" ? "Wi-Fi" : "Bluetooth"}</span>
-				<button
-					className={`cp-switch ${enabled ? "on" : ""}`}
-					onClick={onToggle}
-					title={enabled ? "Turn off" : "Turn on"}
-				>
-					<span />
-				</button>
+		<PinContext.Provider value={onPinChange}>
+			<div className="cp" onClick={(e) => e.stopPropagation()} onWheel={(e) => e.stopPropagation()}>
+				<div className="cp-head">
+					<button className="cp-back" onClick={onBack} title="Back">
+						<ChevronLeft size={16} />
+					</button>
+					<span className="cp-title">{kind === "wifi" ? "Wi-Fi" : "Bluetooth"}</span>
+					<button
+						className={`cp-switch ${enabled ? "on" : ""}`}
+						onClick={onToggle}
+						title={enabled ? "Turn off" : "Turn on"}
+					>
+						<span />
+					</button>
+				</div>
+				{!enabled ? (
+					<div className="cp-empty">{kind === "wifi" ? "Wi-Fi is off" : "Bluetooth is off"}</div>
+				) : kind === "wifi" ? (
+					<WifiList />
+				) : (
+					<BluetoothList />
+				)}
 			</div>
-			{!enabled ? (
-				<div className="cp-empty">{kind === "wifi" ? "Wi-Fi is off" : "Bluetooth is off"}</div>
-			) : kind === "wifi" ? (
-				<WifiList />
-			) : (
-				<BluetoothList />
-			)}
-		</div>
+		</PinContext.Provider>
 	);
 }
 
@@ -97,6 +103,11 @@ function SecretField(props: {
 }) {
 	const [value, setValue] = useState("");
 	const [shown, setShown] = useState(false);
+	const pin = useContext(PinContext);
+	useEffect(() => {
+		pin?.(true);
+		return () => pin?.(false);
+	}, [pin]);
 	return (
 		<form
 			className="cp-secret"
@@ -202,7 +213,7 @@ function WifiList() {
 		setBusy(ssid);
 		setNote(null);
 		try {
-			const result = await invoke<string>("wifi_connect", { ssid, password });
+			const result = await invoke<string>("wifi_join", { ssid, password });
 			if (result === "password") {
 				setAsking(ssid);
 				setOpen(ssid);
@@ -278,7 +289,7 @@ function WifiList() {
 								<button
 									className="cp-btn"
 									onClick={() =>
-										invoke("wifi_disconnect")
+										invoke("wifi_leave")
 											.then(refresh)
 											.catch((e) => setNote({ ssid: n.ssid, text: message(e) }))
 											.finally(() => setOpen(null))

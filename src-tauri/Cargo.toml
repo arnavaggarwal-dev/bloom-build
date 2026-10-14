@@ -1,6 +1,6 @@
 [package]
 name = "bloom"
-version = "3.9.2"
+version = "3.10.0"
 description = ""
 authors = ["sehaz"]
 edition = "2021"
@@ -31,10 +31,13 @@ tokio = { version = "1", features = ["time", "sync"] }
 image = "0.25"
 tauri-plugin-drag = "2.1.1"
 tauri-plugin-dialog = "2"
+# Reads the thumbnail or text inside Office files for shelf previews.
+zip = { version = "4.6", default-features = false, features = ["deflate-flate2"] }
 
 [target.'cfg(windows)'.dependencies]
 rustfft = "6"
 windows-core = "0.61"
+windows-collections = "0.2"
 windows = { version = "0.61", features = [
 	"Win32_UI_Input_KeyboardAndMouse",
 	"Win32_UI_Shell",
@@ -56,6 +59,8 @@ windows = { version = "0.61", features = [
 	"Win32_System_Wmi",
 	"Win32_Storage_FileSystem",
 	"Win32_System_Ole",
+	"Data_Pdf",
+	"Storage",
 	"Storage_Streams",
 	"Win32_System_Console",
 	"Graphics_Imaging",
@@ -68,22 +73,22 @@ windows = { version = "0.61", features = [
 	"Win32_System_Registry",
 	"Win32_Devices_FunctionDiscovery",
 	"Devices_Radios",
+	"Devices_Bluetooth",
+	"Devices_Enumeration",
+	"Foundation_Collections",
+	"Win32_Media_KernelStreaming",
 	"System_Power",
 	"Win32_System_Power",
 	"Win32_NetworkManagement_IpHelper",
 	"Win32_NetworkManagement_Ndis",
 	"Win32_NetworkManagement_WiFi",
 	"Win32_NetworkManagement_WNet",
-	"Win32_Media_KernelStreaming",
 	"Foundation",
 	"Devices_WiFi",
-	"Devices_Enumeration",
-	"Foundation_Collections",
 	"Networking_Connectivity",
 	"Security_Credentials"
 ] }
 window-vibrancy = "0.7.1"
-windows-collections = "0.2"
 wmi = "0.14"
 webview2-com = "0.38"
 

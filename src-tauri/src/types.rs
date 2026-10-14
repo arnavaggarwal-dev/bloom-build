@@ -83,6 +83,8 @@ pub struct VolumeChangeEvent {
 pub struct WifiStatus {
     pub enabled: bool,
     pub connected: bool,
+    /// The connected network's name, for the controls tile.
+    pub ssid: Option<String>,
     /// The internet connection runs over a cable, whatever the Wi-Fi radio does.
     pub ethernet: bool,
 }

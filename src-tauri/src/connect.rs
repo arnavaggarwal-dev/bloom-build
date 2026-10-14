@@ -832,13 +832,15 @@ pub async fn wifi_networks() -> Result<Vec<WifiNetwork>, String> {
     blocking(imp::wifi_networks).await
 }
 
+// Named apart from wifi.rs's wifi_connect / wifi_disconnect (the notch Wi-Fi
+// panel): two public commands with one name collide at the crate root.
 #[tauri::command]
-pub async fn wifi_connect(ssid: String, password: Option<String>) -> JoinResult {
+pub async fn wifi_join(ssid: String, password: Option<String>) -> JoinResult {
     blocking(move || imp::wifi_connect(&ssid, password.as_deref())).await
 }
 
 #[tauri::command]
-pub async fn wifi_disconnect() -> Result<(), String> {
+pub async fn wifi_leave() -> Result<(), String> {
     blocking(imp::wifi_disconnect).await
 }
 

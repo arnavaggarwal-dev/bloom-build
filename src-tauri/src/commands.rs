@@ -66,47 +66,17 @@ pub fn setup_shelf_drop(app: AppHandle) {
     });
 }
 
-/// Small PNG preview for shelf items, as a data URI. `None` for anything that
-/// is not a readable image (the frontend falls back to a generic file icon).
+/// Preview for a shelf item: a picture, the opening text, or neither (the
+/// frontend then shows an icon for the file type). See shelf_preview.rs.
 #[tauri::command]
-pub async fn shelf_thumbnail(path: String) -> Option<String> {
-    use base64::Engine;
-
-    let p = std::path::Path::new(&path);
-    let ext = p.extension()?.to_str()?.to_ascii_lowercase();
-    if !matches!(
-        ext.as_str(),
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "tif" | "tiff"
-    ) {
-        return None;
-    }
-    let meta = std::fs::metadata(p).ok()?;
-    if !meta.is_file() || meta.len() > 32 * 1024 * 1024 {
-        return None;
-    }
-
-    // Decode with dimension/allocation caps: a small, highly compressed file
-    // can still expand into a huge bitmap.
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(8192);
-    limits.max_image_height = Some(8192);
-    limits.max_alloc = Some(256 * 1024 * 1024);
-    let mut reader = image::ImageReader::open(p)
-        .ok()?
-        .with_guessed_format()
-        .ok()?;
-    reader.limits(limits);
-    let img = reader.decode().ok()?;
-    let thumb = img.thumbnail(256, 256);
-    let mut png_bytes: Vec<u8> = Vec::new();
-    thumb
-        .write_to(
-            &mut std::io::Cursor::new(&mut png_bytes),
-            image::ImageFormat::Png,
-        )
-        .ok()?;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
-    Some(format!("data:image/png;base64,{}", b64))
+pub async fn shelf_thumbnail(path: String) -> crate::shelf_preview::ShelfPreview {
+    tauri::async_runtime::spawn_blocking(move || crate::shelf_preview::preview(&path))
+        .await
+        .unwrap_or(crate::shelf_preview::ShelfPreview {
+            thumb: None,
+            text: None,
+            folder: false,
+        })
 }
 
 /// Opens a shelf file in its default app. Uses the opener plugin's Rust API
@@ -515,6 +485,13 @@ pub async fn change_notch_mode(app: AppHandle, mode: String) {
 #[cfg(windows)]
 fn get_uwp_launch_cmd(exe_path: &str) -> Option<String> {
     let family = package_family_from_windows_apps_path(exe_path)?;
+    // The shell lookup below needs COM on this thread.
+    unsafe {
+        let _ = windows::Win32::System::Com::CoInitializeEx(
+            None,
+            windows::Win32::System::Com::COINIT_MULTITHREADED,
+        );
+    }
     // The app's real id from the shell: "!App" is only the common suffix, and
     // a guess is silently not launched (new Teams is "MSTeams_...!MSTeams").
     let aumid = find_aumid_by_family(&family).unwrap_or_else(|| format!("{family}!App"));
@@ -1860,6 +1837,30 @@ pub fn save_pinned_apps(app: AppHandle, apps: Vec<AppInfo>) -> Result<(), String
     Ok(())
 }
 
+/// Apps pinned while running were saved under their executable's name
+/// ("WhatsApp.Root", "localsend_app"). Gives those their Start menu name, once
+/// the installed-apps scan has results: the dock loads its pins again when the
+/// scan emits `installed-apps-updated`, then saves the corrected list. Names
+/// that differ from the file name are kept as they are.
+#[cfg_attr(not(windows), allow(unused_mut))]
+fn refresh_pinned_names(mut apps: Vec<AppInfo>) -> Vec<AppInfo> {
+    // Start menu names come from the Windows installed-apps scan.
+    #[cfg(windows)]
+    for app in &mut apps {
+        let stem = std::path::Path::new(&app.path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
+        if stem.is_empty() || !app.name.eq_ignore_ascii_case(stem) {
+            continue;
+        }
+        if let Some(name) = installed_app_name(&app.path) {
+            app.name = name;
+        }
+    }
+    apps
+}
+
 #[tauri::command]
 pub async fn load_pinned_apps(app: AppHandle) -> Vec<AppInfo> {
     let path = app
@@ -1868,8 +1869,10 @@ pub async fn load_pinned_apps(app: AppHandle) -> Vec<AppInfo> {
         .unwrap_or_default()
         .join("pinned_apps.json");
     if let Ok(content) = std::fs::read_to_string(path) {
-        if let Ok(apps) = serde_json::from_str(&content) {
-            return apps;
+        if let Ok(apps) = serde_json::from_str::<Vec<AppInfo>>(&content) {
+            return tauri::async_runtime::spawn_blocking(move || refresh_pinned_names(apps))
+                .await
+                .unwrap_or_default();
         }
     }
     #[cfg(target_os = "linux")]
@@ -2640,6 +2643,63 @@ pub(crate) unsafe fn process_image_path(pid: u32) -> Option<String> {
     Some(String::from_utf16_lossy(&buf[..size as usize]))
 }
 
+/// The name an app goes by in the Start menu, from the installed-apps scan:
+/// a packaged app by its AppUserModelID or package family, a desktop app by
+/// its executable. Programs often leave their own description unset or set it
+/// to an internal name ("WhatsApp.Root", "localsend_app"), so this is the
+/// preferred label for running and tray apps. `None` when the scan has no
+/// single answer, e.g. a browser executable shared by several web apps.
+#[cfg(windows)]
+pub(crate) fn installed_app_name(path_or_aumid: &str) -> Option<String> {
+    let apps = INSTALLED_APPS_CACHE.get()?.lock().ok()?;
+    let unique = |names: Vec<&str>| -> Option<String> {
+        let (first, rest) = names.split_first()?;
+        rest.iter()
+            .all(|n| n.eq_ignore_ascii_case(first))
+            .then(|| first.to_string())
+    };
+
+    if path_or_aumid.contains('!') && !path_or_aumid.contains('\\') {
+        return apps
+            .iter()
+            .find(|app| app.path.eq_ignore_ascii_case(path_or_aumid))
+            .map(|app| app.name.clone());
+    }
+    if let Some(family) = package_family_from_windows_apps_path(path_or_aumid) {
+        let prefix = format!("{}!", family.to_lowercase());
+        if let Some(name) = unique(
+            apps.iter()
+                .filter(|app| app.path.to_lowercase().starts_with(&prefix))
+                .map(|app| app.name.as_str())
+                .collect(),
+        ) {
+            return Some(name);
+        }
+    }
+    let exe = std::path::Path::new(path_or_aumid).file_name()?.to_str()?;
+    unique(
+        apps.iter()
+            .filter(|app| {
+                app.executable
+                    .as_deref()
+                    .is_some_and(|e| e.eq_ignore_ascii_case(exe))
+            })
+            .map(|app| app.name.as_str())
+            .collect(),
+    )
+}
+
+/// Label for a running or tray app: its Start menu name when known, else the
+/// executable's own description, else its file name.
+#[cfg(windows)]
+pub(crate) fn app_display_name(exe_path: &str, aumid: Option<&str>) -> String {
+    aumid
+        .filter(|id| id.contains('!'))
+        .and_then(installed_app_name)
+        .or_else(|| installed_app_name(exe_path))
+        .unwrap_or_else(|| unsafe { friendly_process_name(exe_path) })
+}
+
 /// Friendly name for an executable: the shell's `FileDescription` from version
 /// info ("Google Chrome"), falling back to the prettified file stem. Results are
 /// cached by path because the mixer polls while it is open.
@@ -3242,79 +3302,19 @@ pub fn get_brightness() -> u32 {
     crate::state::CURRENT_BRIGHTNESS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-// ── Wi-Fi status — WLAN API for association state ────────────────────────────
-// The radio state only says Wi-Fi is on, not whether it is connected, so the
-// notch quick settings needs a second bit to distinguish "on" from "connected".
-
-#[cfg(windows)]
-fn is_wlan_connected_sync() -> bool {
-    use windows::Win32::Foundation::HANDLE;
-    use windows::Win32::NetworkManagement::WiFi::{
-        wlan_intf_opcode_current_connection, WlanCloseHandle, WlanEnumInterfaces, WlanFreeMemory,
-        WlanOpenHandle, WlanQueryInterface, WLAN_INTERFACE_INFO_LIST,
-    };
-
-    unsafe {
-        let mut negotiated_version = 0u32;
-        let mut client_handle = HANDLE::default();
-        if WlanOpenHandle(2, None, &mut negotiated_version, &mut client_handle) != 0 {
-            return false;
-        }
-
-        let mut interface_list: *mut WLAN_INTERFACE_INFO_LIST = std::ptr::null_mut();
-        let mut connected = false;
-        if WlanEnumInterfaces(client_handle, None, &mut interface_list) != 0 {
-            WlanCloseHandle(client_handle, None);
-            return false;
-        }
-        // A success code guarantees an allocated list; as_ref() turns the
-        // pointer into a checked reference. WLAN_INTERFACE_INFO_LIST ends in a
-        // C flexible array (InterfaceInfo[1] with dwNumberOfItems entries), so
-        // the count is sanity-bounded before building the slice.
-        if let Some(list) = interface_list.as_ref() {
-            let count = list.dwNumberOfItems as usize;
-            if count > 0 && count <= 64 {
-                let interfaces = std::slice::from_raw_parts(list.InterfaceInfo.as_ptr(), count);
-                for interface in interfaces {
-                    let mut data_size = 0u32;
-                    let mut data: *mut std::ffi::c_void = std::ptr::null_mut();
-                    // Returns ERROR_INVALID_STATE when the interface is not
-                    // associated, so a successful query means an active connection.
-                    let result = WlanQueryInterface(
-                        client_handle,
-                        &interface.InterfaceGuid,
-                        wlan_intf_opcode_current_connection,
-                        None,
-                        &mut data_size,
-                        &mut data,
-                        None,
-                    );
-                    if !data.is_null() {
-                        WlanFreeMemory(data);
-                    }
-                    if result == 0 {
-                        connected = true;
-                        break;
-                    }
-                }
-            }
-            WlanFreeMemory(interface_list as *const _);
-        }
-
-        WlanCloseHandle(client_handle, None);
-        connected
-    }
-}
-
 /// Wi-Fi radio and association state, so the notch quick settings tile can show
-/// Off / On / Connected. `connected` is false while the radio is on but no
-/// network is associated.
+/// Off / On / the connected network. The radio state alone only says Wi-Fi is
+/// on, so the WLAN API supplies the association.
 #[cfg(windows)]
 #[tauri::command]
 pub async fn get_wifi_status() -> Result<WifiStatus, String> {
     tauri::async_runtime::spawn_blocking(|| -> Result<WifiStatus, String> {
         let enabled = get_radio_state_sync(windows::Devices::Radios::RadioKind::WiFi)?;
-        let connected = enabled && is_wlan_connected_sync();
+        let ssid = if enabled {
+            crate::wifi::connected_ssid()
+        } else {
+            None
+        };
         // A cable is plugged in and connected (IANA type 6 is Ethernet, USB
         // adapters included), even when Windows still routes the internet over
         // Wi-Fi on the same router. Virtual adapters (VirtualBox, Hyper-V) have
@@ -3328,7 +3328,12 @@ pub async fn get_wifi_status() -> Result<WifiStatus, String> {
                 })
             })
         });
-        Ok(WifiStatus { enabled, connected, ethernet })
+        Ok(WifiStatus {
+            enabled,
+            connected: ssid.is_some(),
+            ssid,
+            ethernet,
+        })
     })
     .await
     .map_err(|e| e.to_string())?
@@ -4141,7 +4146,7 @@ pub(crate) fn reload_settings(app: &AppHandle, settings_path: &std::path::Path) 
                 *cache = new_settings.clone();
                 (changed, removed)
             };
-            // Lock dropped — safe to emit without blocking save_setting
+            // Lock dropped, safe to emit without blocking save_setting
             for (key, value) in &changed {
                 let _ = app.emit(
                     "settings-external-changed",

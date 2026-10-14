@@ -1,12 +1,12 @@
 import { useState, useEffect, useLayoutEffect, useMemo, useRef, memo } from "react";
-import { motion, AnimatePresence, Reorder } from "framer-motion";
+import { motion, AnimatePresence, Reorder, animate, useMotionValue, useTransform } from "framer-motion";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import "./Dock.css";
 import { initTheme } from "./theme";
 import { useBoolSetting, useSettingsSync } from "./hooks/useSettingsSync";
 import { reloadIfMirrorWasStale } from "./hooks/settingsMirror";
-import { DOCK_SPRING, InfoLeft, InfoPanel, InfoProvider, InfoRight, type InfoTab } from "./InfoCentre";
+import { DOCK_SPRING, InfoLeft, InfoPanel, InfoProvider, InfoRight, PANEL_HEIGHT, type InfoTab } from "./InfoCentre";
 import { ChevronUp, Copy, Keyboard } from "lucide-react";
 import { useGlass, useGlassEnabled, useInfoCentre } from "./hooks/useGlass";
 
@@ -88,7 +88,7 @@ function resolveStartIcon(startIcon: string): string {
 	if (startIcon === "bloom-colorful") return "/bloom-colorful.png";
 	if (startIcon === "bloom-golden") return "/bloom-golden.png";
 	if (startIcon === "bloom-biscuit") return "/bloom-biscuit.png";
-	if (startIcon === "windows") return "/windows.png";
+	if (startIcon === "windows") return "/windows-11.png";
 	if (startIcon.startsWith("custom:")) return startIcon.slice("custom:".length);
 	return "/bloom.png";
 }
@@ -473,6 +473,24 @@ const Dock = memo(function Dock() {
 		};
 		init();
 
+		// The installed-apps scan finishes after the first load; pins saved under
+		// their executable's name then get their Start menu name.
+		const unlistenInstalledApps = listen("installed-apps-updated", async () => {
+			try {
+				const refreshed = await invoke<AppInfo[]>("load_pinned_apps");
+				const names = new Map(refreshed.map((a) => [a.path, a.name]));
+				setPinnedApps((prev) => {
+					const next = prev.map((a) => ({ ...a, name: names.get(a.path) ?? a.name }));
+					if (!next.some((a, i) => a.name !== prev[i].name)) return prev;
+					// Pins are otherwise saved only when they change; keep the names.
+					queueMicrotask(() => {
+						invoke("save_pinned_apps", { apps: next }).catch(console.error);
+					});
+					return next;
+				});
+			} catch (_) {}
+		});
+
 		const unlistenOverlap = listen<boolean>("dock-overlap", (event) => {
 			setIsOverlapped(event.payload);
 		});
@@ -491,6 +509,7 @@ const Dock = memo(function Dock() {
 
 		return () => {
 			unlistenOverlap.then((f) => f());
+			unlistenInstalledApps.then((f) => f());
 			unlistenEdgeHover.then((f) => f());
 			unlistenVisibility.then((f) => f());
 			unlistenMaximized.then((f) => f());
@@ -506,26 +525,53 @@ const Dock = memo(function Dock() {
 		"bloom-start-icon": setStartIcon,
 		"bloom-scale": setScale,
 		"bloom-dock-extras-position": setDockExtrasPosition,
+		"bloom-ic-stretch-ms": (v) => setStretchMs(Number(v) || 400),
 		"bloom-dock-extras-drives": () => setDockExtrasRevision((r) => r + 1),
 		"bloom-dock-extras-recycle-bin": () => setDockExtrasRevision((r) => r + 1),
 		"bloom-dock-extras-folders": () => setDockExtrasRevision((r) => r + 1),
 		"bloom-dock-extras-custom-folders": () => setDockExtrasRevision((r) => r + 1)
 	});
 	const infoOpen = infoCentre && !!infoTab && isExpanded && !isHidden && isVisible;
-	// The bar's top corners stay square until the panel has rolled all the way
-	// back in, or they round off early and open a gap under the closing panel.
+	// The last tab shown, so a closing panel keeps its content while it rolls in.
+	const lastTab = useRef<InfoTab>("media");
+	if (infoTab) lastTab.current = infoTab;
+	// Merged mode: the bar and its panel are one sheet (.dock-sheet) that
+	// stretches up by the panel's height. stretch runs 0 (bar) to 1 (panel
+	// open); the sheet's rounded top rides up with it, so nothing joins or
+	// re-rounds, and the same value reveals the panel's content.
+	// Its speed is the user's (Settings, Notch).
+	const [stretchMs, setStretchMs] = useState(() => Number(localStorage.getItem("bloom-ic-stretch-ms")) || 400);
+	const stretch = useMotionValue(0);
+	const sheetTop = useTransform(stretch, (v) => -v * PANEL_HEIGHT);
 	const [panelUp, setPanelUp] = useState(false);
 	useEffect(() => {
 		if (infoOpen) setPanelUp(true);
+		const run = animate(stretch, infoOpen ? 1 : 0, {
+			type: "spring",
+			bounce: 0,
+			duration: stretchMs / 1000,
+			onComplete: () => {
+				if (!infoOpen) setPanelUp(false);
+				// A stale rect would leave an invisible strip above the dock eating clicks.
+				updateRectRef.current();
+			}
+		});
+		return () => run.stop();
 	}, [infoOpen]);
-	// One glass sheet: the open info panel and the dock under it share it.
+	// Merging (the notch dropped into the dock) and unmerging play a squash:
+	// the bar takes the notch's weight and springs back, or stretches up as
+	// the notch leaves it. Not on first load.
+	const [mergePulse, setMergePulse] = useState<"in" | "out" | null>(null);
+	const wasMerged = useRef(infoCentre);
+	useEffect(() => {
+		if (wasMerged.current === infoCentre) return;
+		wasMerged.current = infoCentre;
+		setMergePulse(infoCentre ? "in" : "out");
+	}, [infoCentre]);
+	// The glass follows the stretching sheet in merged mode, else the dock.
 	const glass = useGlassEnabled();
-	const infoOpenRef = useRef(infoOpen);
-	infoOpenRef.current = infoOpen;
-	// A closing panel stops counting as glass at once, not when its exit
-	// animation ends.
 	useGlass(
-		() => [[infoOpenRef.current ? infoPanelRef.current?.querySelector(".ic-panel") : null, dockRef.current]],
+		() => [infoCentreRef.current ? dockRef.current?.querySelector(".dock-sheet") : dockRef.current],
 		glass
 	);
 
@@ -533,13 +579,6 @@ const Dock = memo(function Dock() {
 	useEffect(() => {
 		if (hoveredApp) setInfoTab(null);
 	}, [hoveredApp]);
-
-	// Once the panel's exit animation is over, shrink the click area back to the
-	// bar — a stale rect would leave an invisible strip above the dock eating clicks.
-	useEffect(() => {
-		const t = setTimeout(() => updateRectRef.current(), 450);
-		return () => clearTimeout(t);
-	}, [infoOpen]);
 
 	useEffect(() => {
 		if (dockExtrasPosition === "off") {
@@ -1332,12 +1371,16 @@ const Dock = memo(function Dock() {
 						width:
 							isExpanded && !isHidden && isVisible ? (isAdaptive ? adaptiveWidth : "auto") : 34,
 						height: isExpanded && !isHidden && isVisible ? "auto" : 34,
-						borderTopLeftRadius: infoOpen || panelUp ? 0 : (isImpacted || isExpanded) && !isHidden && isVisible ? 18 : 17,
-						borderTopRightRadius: infoOpen || panelUp ? 0 : (isImpacted || isExpanded) && !isHidden && isVisible ? 18 : 17,
+						borderTopLeftRadius: (isImpacted || isExpanded) && !isHidden && isVisible ? 18 : 17,
+						borderTopRightRadius: (isImpacted || isExpanded) && !isHidden && isVisible ? 18 : 17,
 						borderBottomLeftRadius: (isImpacted || isExpanded) && !isHidden && isVisible ? 0 : 17,
 						borderBottomRightRadius: (isImpacted || isExpanded) && !isHidden && isVisible ? 0 : 17,
 						opacity: isVisible ? 1 : 0,
-						scale: scale
+						scale: scale,
+						scaleX: mergePulse === "in" ? [1, 1.05, 0.99, 1] : mergePulse === "out" ? [1, 0.96, 1.01, 1] : 1,
+						scaleY: mergePulse === "in" ? [1, 0.8, 1.05, 1] : mergePulse === "out" ? [1, 1.25, 0.97, 1] : 1,
+						// Animated, so merging widens the bar instead of jumping.
+						minWidth: infoCentre && isExpanded && !isHidden && isVisible ? 640 : 34
 					}}
 					transition={{
 						y: { type: "spring", stiffness: 400, damping: 35, mass: 0.8 },
@@ -1349,29 +1392,38 @@ const Dock = memo(function Dock() {
 						borderBottomLeftRadius: DOCK_SPRING,
 						borderBottomRightRadius: DOCK_SPRING,
 						opacity: { type: "tween", duration: 0.2 },
-						scale: { duration: 0 }
+						scale: { duration: 0 },
+						scaleX: { duration: 0.6, times: [0, 0.3, 0.7, 1], ease: "easeOut" },
+						scaleY: { duration: 0.6, times: [0, 0.3, 0.7, 1], ease: "easeOut" },
+						minWidth: DOCK_SPRING
 					}}
-					style={{
-						originX: 0.5,
-						originY: 1,
-						minWidth: infoCentre && isExpanded && !isHidden && isVisible ? 640 : 34
-					}}
+					onAnimationComplete={() => mergePulse && setMergePulse(null)}
+					style={{ originX: 0.5, originY: 1 }}
 					onContextMenu={(e) => handleContextMenu(e, null)}
 				>
+					{infoCentre && <motion.div className="dock-sheet" style={{ top: sheetTop }} />}
 					<AnimatePresence>
 						{isExpanded && (
 							<motion.div
 								key="dock-content"
 								// Converges with the bar instead of hanging outside it while
 								// it shrinks (the dock doesn't clip: its menus overflow).
+								// Coming in it fades in behind the shape: the bar grows first
+								// and its contents settle into it, never ahead of it.
 								initial={{ opacity: 0, scale: 0.6 }}
-								animate={{ opacity: 1, scale: 1 }}
-								exit={{ opacity: 0, scale: 0.6 }}
-								transition={{ scale: DOCK_SPRING, opacity: { duration: 0.18 } }}
+								animate={{ opacity: 1, scale: 1, transition: { scale: DOCK_SPRING, opacity: { duration: 0.2, delay: 0.12 } } }}
+								exit={{ opacity: 0, scale: 0.6, transition: { scale: DOCK_SPRING, opacity: { duration: 0.14 } } }}
 								className="dock-reorder-container"
 							>
 								{infoCentre && (
-									<InfoLeft active={infoTab !== null && infoTab !== "controls"} onOpen={() => openInfo(infoTab && infoTab !== "controls" ? infoTab : "media")} />
+									<motion.div
+										className="ic-merge-in"
+										initial={mergePulse === "in" ? { opacity: 0, x: 60, filter: "blur(8px)" } : false}
+										animate={{ opacity: 1, x: 0, filter: "blur(0px)" }}
+										transition={{ ...DOCK_SPRING, delay: 0.15 }}
+									>
+										<InfoLeft active={infoTab !== null && infoTab !== "controls"} onOpen={() => openInfo(infoTab && infoTab !== "controls" ? infoTab : "media")} />
+									</motion.div>
 								)}
 								{startItem &&
 									startButton &&
@@ -1770,6 +1822,7 @@ const Dock = memo(function Dock() {
 														// open (openTrayMenu would close every Bloom menu first).
 														onContextMenu={(e) => {
 															e.preventDefault();
+															e.stopPropagation();
 															invoke("show_tray_context_menu", { trayId: app.tray_ids[0] }).catch(showActionError);
 														}}
 													>
@@ -1779,23 +1832,29 @@ const Dock = memo(function Dock() {
 											</div>
 										)}
 									</div>
-									<InfoRight active={infoTab === "controls"} onOpen={() => openInfo("controls")} />
+									<motion.div
+										className="ic-merge-in"
+										initial={mergePulse === "in" ? { opacity: 0, x: -60, filter: "blur(8px)" } : false}
+										animate={{ opacity: 1, x: 0, filter: "blur(0px)" }}
+										transition={{ ...DOCK_SPRING, delay: 0.15 }}
+									>
+										<InfoRight active={infoTab === "controls"} onOpen={() => openInfo("controls")} />
+									</motion.div>
 									</>
 								)}
 							</motion.div>
 						)}
 					</AnimatePresence>
-					<AnimatePresence onExitComplete={() => setPanelUp(false)}>
-						{infoOpen && (
-							<div ref={infoPanelRef} className="ic-panel-anchor" key="info-panel">
-								<InfoPanel
-									tab={infoTab!}
-									setTab={setInfoTab}
-									onResize={() => updateRectRef.current()}
-								/>
-							</div>
-						)}
-					</AnimatePresence>
+					{infoCentre && (infoOpen || panelUp) && (
+						<div ref={infoPanelRef} className="ic-panel-anchor">
+							<InfoPanel
+								tab={infoTab ?? lastTab.current}
+								setTab={setInfoTab}
+								reveal={stretch}
+								onResize={() => updateRectRef.current()}
+							/>
+						</div>
+					)}
 				</motion.div>
 			</div>
 

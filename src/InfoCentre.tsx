@@ -4,7 +4,8 @@
 // controls. Everything here reuses the commands and events the notch uses.
 
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
-import { AnimatePresence, motion, type Variants } from "framer-motion";
+import { Visualizer } from "./Visualizer";
+import { AnimatePresence, motion, useTransform, type MotionValue, type Variants } from "framer-motion";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import {
@@ -64,8 +65,8 @@ const ALL_TABS: [InfoTab, string][] = [
 	["media", "Now playing"],
 	["calendar", "Calendar"],
 	["timer", "Timer"],
-	["controls", "Controls"],
-	["shelf", "Shelf"]
+	["shelf", "Shelf"],
+	["controls", "Controls"]
 ];
 
 interface MediaInfo {
@@ -307,17 +308,6 @@ function useClock(time24h: boolean) {
 	return time;
 }
 
-function Bars({ playing }: { playing: boolean }) {
-	return (
-		<span className={`ic-bars ${playing ? "" : "paused"}`}>
-			<i />
-			<i />
-			<i />
-			<i />
-		</span>
-	);
-}
-
 interface ZoneProps {
 	active: boolean;
 	onOpen: () => void;
@@ -350,7 +340,7 @@ export function InfoLeft({ active, onOpen }: ZoneProps) {
 							<Music size={12} />
 						</span>
 					)}
-					<Bars playing={media.is_playing} />
+					<Visualizer isPlaying={media.is_playing} bars={4} height={16} />
 					<span className="ic-np-title">
 						{media.title}
 						{media.artist ? ` · ${media.artist}` : ""}
@@ -404,12 +394,14 @@ const SLIDE_SPRING = { type: "spring", stiffness: 420, damping: 36, mass: 0.8 } 
 interface PanelProps {
 	tab: InfoTab;
 	setTab: (tab: InfoTab) => void;
+	/** The dock's stretch, 0 (bar) to 1 (open): reveals the panel as the sheet behind it grows. */
+	reveal: MotionValue<number>;
 	/** Called whenever the panel's box changes, so the dock's click area follows. */
 	onResize: () => void;
 }
 
 // Every tab is 300px tall.
-const PANEL_HEIGHT = 300;
+export const PANEL_HEIGHT = 300;
 
 /** The tabs the user hid (Settings, Notch). Controls can never be hidden. */
 export const HIDDEN_TABS_KEY = "bloom-ic-hidden-tabs";
@@ -420,14 +412,29 @@ function useHiddenTabs() {
 	return hidden;
 }
 
-export function InfoPanel({ tab, setTab, onResize }: PanelProps) {
+/** The user's tab order (Settings, Notch); tabs it doesn't list keep their default place. */
+const ORDER_KEY = "bloom-ic-tab-order";
+const rank = (order: string[], id: string) => {
+	const i = order.indexOf(id);
+	return i < 0 ? order.length + ALL_TABS.findIndex(([t]) => t === id) : i;
+};
+function useTabOrder() {
+	const read = (v: unknown) => String(v ?? "").split(",").filter(Boolean);
+	const [order, setOrder] = useState(() => read(localStorage.getItem(ORDER_KEY)));
+	useSettingsSync({ [ORDER_KEY]: (v) => setOrder(read(v)) });
+	return order;
+}
+
+export function InfoPanel({ tab, setTab, reveal, onResize }: PanelProps) {
 	const hidden = useHiddenTabs();
-	const TABS = ALL_TABS.filter(([id]) => !hidden.includes(id));
+	const order = useTabOrder();
+	const TABS = ALL_TABS.filter(([id]) => !hidden.includes(id)).sort(([a], [b]) => rank(order, a) - rank(order, b));
 	// Hidden while open (or opened onto a hidden tab): the first one left
 	// (Controls at worst, which can't be hidden).
 	useEffect(() => {
 		if (hidden.includes(tab)) setTab(TABS[0][0]);
 	}, [tab, hidden]);
+	const clipPath = useTransform(reveal, (v) => `inset(${(1 - v) * 100}% 0% 0% 0% round 18px 18px 0px 0px)`);
 	const ref = useRef<HTMLDivElement>(null);
 	useEffect(() => {
 		if (!ref.current) return;
@@ -472,14 +479,9 @@ export function InfoPanel({ tab, setTab, onResize }: PanelProps) {
 		<motion.div
 			ref={ref}
 			className="ic-panel"
-			// Unrolls upward out of the bar, and rolls back into it on close.
-			// Same path both ways and the bar's own spring: no fade, so it reads as
-			// one surface unrolling from the bar and rolling back into it.
-			initial={{ clipPath: "inset(100% 0% 0% 0% round 18px 18px 0px 0px)", height: PANEL_HEIGHT }}
-			animate={{ clipPath: "inset(0% 0% 0% 0% round 18px 18px 0px 0px)", height: PANEL_HEIGHT }}
-			exit={{ clipPath: "inset(100% 0% 0% 0% round 18px 18px 0px 0px)" }}
-			transition={DOCK_SPRING}
-			onAnimationComplete={onResize}
+			// No surface of its own: the dock's sheet stretches up behind it, and
+			// this clip, on the same value, keeps the content inside that sheet.
+			style={{ height: PANEL_HEIGHT, clipPath }}
 			onWheel={onWheel}
 			onClick={(e) => e.stopPropagation()}
 			onContextMenu={(e) => e.stopPropagation()}
@@ -715,8 +717,8 @@ function ShelfView() {
 		for (const { path } of items) {
 			if (!path || path in thumbs) continue;
 			setThumbs((t) => ({ ...t, [path]: null }));
-			invoke<string | null>("shelf_thumbnail", { path })
-				.then((img) => setThumbs((t) => ({ ...t, [path]: img })))
+			invoke<{ thumb: string | null }>("shelf_thumbnail", { path })
+				.then(({ thumb }) => setThumbs((t) => ({ ...t, [path]: thumb })))
 				.catch(() => {});
 		}
 	}, [items]);

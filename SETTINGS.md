@@ -23,6 +23,7 @@ Edit `settings.json` with any text editor while Bloom is running. Changes are ap
 | ---------------------------------- | -------------------------------- | ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `bloom-dock-enabled`               | `"true"` / `"false"`             | `"true"`      | Show or hide the Bloom Dock (taskbar replacement).                                                                                                                               |
 | `bloom-dock-mode`                  | `"fixed"` / `"smart"` / `"peek"` | `"smart"`     | Dock visibility behavior. **fixed** = always visible as AppBar. **smart** = auto-hide when overlapped by fullscreen apps. **peek** = hidden until cursor approaches bottom edge. |
+| `bloom-dock-edge-delay`            | milliseconds `"0"`–`"2000"`      | `"200"`       | In smart/peek mode, how long the cursor must rest against the bottom screen edge before the dock appears. `"0"` reveals instantly.                                               |
 | `bloom-dock-preview-enabled`       | `"true"` / `"false"`             | `"true"`      | Show window thumbnail previews when hovering dock icons.                                                                                                                         |
 | `bloom-dock-icon-only`             | `"true"` / `"false"`             | `"false"`     | Minimal icon-only style (no background/padding around icons).                                                                                                                    |
 | `bloom-dock-separator-enabled`     | `"true"` / `"false"`             | `"true"`      | Show a divider between pinned and unpinned dock apps when unpinned apps are present. Unpinned apps remain on the right when disabled.                                            |
@@ -60,13 +61,22 @@ Edit `settings.json` with any text editor while Bloom is running. Changes are ap
 
 ### Modules
 
-| Key                         | Type                 | Default  | Description                                                           |
-| --------------------------- | -------------------- | -------- | --------------------------------------------------------------------- |
-| `bloom-calendar-enabled`    | `"true"` / `"false"` | `"true"` | Enable calendar/timer mode in the notch.                              |
+| Key                         | Type                              | Default  | Description                                                                                              |
+| --------------------------- | --------------------------------- | -------- | -------------------------------------------------------------------------------------------------------- |
+| `bloom-calendar-enabled`    | `"true"` / `"false"`              | `"true"` | Enable calendar/timer mode in the notch.                                                                 |
 | `bloom-info-centre`        | `"true"` / `"false"` | `"false"` | Merge the notch into the dock as one info centre ("Merge with Dock"). |
+| `bloom-ic-hidden-tabs`             | comma list                       | `""`          | Info centre tabs hidden in merged mode (`media`, `calendar`, `timer`, `shelf`; Controls can't be hidden). |
+| `bloom-ic-tab-order`               | comma list                       | `""`          | Info centre tab order in merged mode; tabs it doesn't list keep their default place (Now playing, Calendar, Timer, Shelf, Controls). |
+| `bloom-ic-stretch-ms`             | number (150-900)                 | `"400"`       | Merged mode: how long, in ms, the info panel takes to stretch up out of the dock and back. |
+| `bloom-viz-style`                 | `"wave"` \| `"bars"` \| `"blocks"` | `"wave"`      | Audio visualizer style (notch and merged dock), after Kurve: mirrored curve, round bars or stacked blocks. |
+| `bloom-viz-color`                 | `"rainbow"` \| `"smooth"` \| `"mono"` | `"rainbow"` | Audio visualizer colour: drifting rainbow, a gradient around the accent, or the text colour. |
 | `bloom-glass`               | `"true"` / `"false"` | `"true"`  | Frosted glass (native blur) under the dock and notch; off saves power. |
-| `bloom-music-mode-enabled`  | `"true"` / `"false"` | `"true"` | Enable interactive music media widget.                                |
-| `bloom-music-compact-notch` | `"true"` / `"false"` | `"true"` | Show compact music display (visualizer + artwork) in collapsed notch. |
+| `bloom-music-mode-enabled`  | `"true"` / `"false"`              | `"true"` | Enable interactive music media widget.                                                                   |
+| `bloom-music-compact-notch` | `"true"` / `"false"`              | `"true"` | Show compact music display (visualizer + artwork) in collapsed notch.                                    |
+| `bloom-notch-remember-panel` | `"true"` / `"false"` | `"true"` | Click opens the last-used panel when on; when off, click opens `bloom-notch-default-panel`. |
+| `bloom-notch-default-panel` | `"calendar"` / `"command-center"` | `"calendar"` | Fixed panel opened on click when panel memory is off. If calendar is disabled, Command Center opens instead. |
+| `bloom-notch-last-panel`    | `"calendar"` / `"command-center"` | (unset)  | Last panel the notch was left on, saved by Bloom while panel memory is on. |
+| `bloom-notch-click-to-open` | `"true"` / `"false"` | (legacy) | Old setting read only when `bloom-notch-remember-panel` is absent; `"false"` now selects fixed-panel behavior. |
 
 ### Shelf
 

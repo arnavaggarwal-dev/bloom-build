@@ -220,6 +220,45 @@ body {
 	padding: 8px 14px;
 }
 
+/* The edge: a hairline in the text colour (light on a dark bar, dark on a
+   light one) around the top and sides, so the bar stays outlined over a
+   window of its own colour. The bottom sits on the screen edge, except for
+   the collapsed pill, which is outlined all round. */
+:root {
+	--dock-edge: color-mix(in srgb, var(--bloom-text, #fff) 22%, transparent);
+}
+.dock,
+.dock-sheet {
+	box-shadow:
+		inset 1px 1px 0 var(--dock-edge),
+		inset -1px 0 0 var(--dock-edge);
+}
+.dock:not(.dock-expanded):not(.dock-impacted) {
+	box-shadow: inset 0 0 0 1px var(--dock-edge);
+}
+
+/* Merged mode: the bar's surface is .dock-sheet, which stretches up behind
+   the info panel as it opens (Dock.tsx, stretch), one shape whose rounded
+   top rides up and back down. The bar itself paints nothing. */
+.dock.ic-on,
+.dock.ic-on:not(.dock-expanded):not(.dock-impacted) {
+	background: transparent;
+	box-shadow: none;
+}
+.dock-sheet {
+	position: absolute;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	z-index: -1;
+	border-radius: inherit;
+	background: var(--bloom-bg, rgba(0, 0, 0, 0.8));
+	pointer-events: none;
+}
+.dock:not(.dock-expanded):not(.dock-impacted) .dock-sheet {
+	box-shadow: inset 0 0 0 1px var(--dock-edge);
+}
+
 .dock-reorder-container {
 	display: flex;
 	flex-direction: row;
@@ -269,10 +308,10 @@ body {
 	background:
 		radial-gradient(
 			circle at 0 0,
-			transparent 12px,
-			var(--bloom-border, rgba(255, 255, 255, 0.1)) 12.7px,
-			var(--bloom-border, rgba(255, 255, 255, 0.1)) 13.3px,
-			transparent 14px
+			transparent 12.6px,
+			var(--dock-edge) 13px,
+			var(--dock-edge) 14px,
+			transparent 14.4px
 		),
 		var(--bloom-bg, rgba(0, 0, 0, 0.8));
 }
@@ -284,10 +323,10 @@ body {
 	background:
 		radial-gradient(
 			circle at 13px 0,
-			transparent 12px,
-			var(--bloom-border, rgba(255, 255, 255, 0.1)) 12.7px,
-			var(--bloom-border, rgba(255, 255, 255, 0.1)) 13.3px,
-			transparent 14px
+			transparent 12.6px,
+			var(--dock-edge) 13px,
+			var(--dock-edge) 14px,
+			transparent 14.4px
 		),
 		var(--bloom-bg, rgba(0, 0, 0, 0.8));
 }
@@ -971,40 +1010,9 @@ body {
 	background: rgba(127, 127, 127, 0.25);
 }
 
-.ic-bars {
-	display: flex;
-	gap: 2px;
-	align-items: flex-end;
-	height: 12px;
+.visualizer-canvas {
+	display: block;
 	flex: none;
-}
-.ic-bars i {
-	width: 2px;
-	border-radius: 1px;
-	background: currentColor;
-	animation: ic-eq 1s ease-in-out infinite;
-}
-.ic-bars i:nth-child(2) {
-	animation-delay: -0.3s;
-}
-.ic-bars i:nth-child(3) {
-	animation-delay: -0.6s;
-}
-.ic-bars i:nth-child(4) {
-	animation-delay: -0.15s;
-}
-.ic-bars.paused i {
-	animation: none;
-	height: 3px;
-}
-@keyframes ic-eq {
-	0%,
-	100% {
-		height: 3px;
-	}
-	50% {
-		height: 12px;
-	}
 }
 
 .ic-batt {
@@ -1029,7 +1037,6 @@ body {
 	display: flex;
 	flex-direction: column;
 	gap: 12px;
-	background: var(--bloom-bg, rgba(0, 0, 0, 0.8));
 	color: var(--bloom-text, white);
 	border-radius: 18px 18px 0 0;
 	white-space: normal;
@@ -1491,7 +1498,7 @@ body {
    lit on their top edge, so the whole applet reads as one material. With the
    info panel open, panel and dock are one sheet: no line between them. */
 html.glass:not(.no-blur) .dock,
-html.glass:not(.no-blur) .ic-panel {
+html.glass:not(.no-blur) .dock-sheet {
 	background-color: color-mix(in srgb, var(--bloom-bg, rgba(0, 0, 0, 0.8)) 52%, transparent);
 	background-image: linear-gradient(
 		180deg,
@@ -1504,18 +1511,10 @@ html.glass:not(.no-blur) .ic-panel {
 		inset 0 0 0 0.5px rgba(255, 255, 255, 0.16),
 		inset 0 -18px 30px -24px rgba(255, 255, 255, 0.12);
 }
-/* One sheet: the panel keeps the top light, the dock carries on beneath it. */
-html.glass:not(.no-blur) .ic-panel {
-	box-shadow:
-		inset 0 1px 0 rgba(255, 255, 255, 0.34),
-		inset 0.5px 0 0 rgba(255, 255, 255, 0.16),
-		inset -0.5px 0 0 rgba(255, 255, 255, 0.16);
-}
-html.glass:not(.no-blur) .dock.ic-open {
-	background-image: none;
-	box-shadow:
-		inset 0.5px 0 0 rgba(255, 255, 255, 0.16),
-		inset -0.5px 0 0 rgba(255, 255, 255, 0.16);
+/* Merged: the sheet is the material, the bar under it stays clear. */
+html.glass:not(.no-blur) .dock.ic-on {
+	background: none;
+	box-shadow: none;
 }
 
 html.glass:not(.no-blur) .ic-tile,
@@ -1642,8 +1641,16 @@ html.glass:not(.no-blur).light-mode .ic-zone.active {
 	display: flex;
 	align-items: center;
 }
-.ic-tray-wrap + .ic-zone {
+.ic-tray-wrap + .ic-merge-in {
 	margin-left: 4px;
+}
+/* InfoLeft/InfoRight's wrappers (they slide in on merge). */
+.ic-merge-in {
+	display: flex;
+	min-width: 0;
+}
+.ic-merge-in:first-child {
+	margin-right: auto;
 }
 .ic-tray-btn {
 	width: 28px;
@@ -1683,7 +1690,9 @@ html.glass:not(.no-blur).light-mode .ic-zone.active {
 	border-radius: 14px;
 	background: var(--bloom-bg, rgba(0, 0, 0, 0.8));
 	color: var(--bloom-text, white);
-	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+	box-shadow:
+		inset 0 0 0 1px var(--dock-edge),
+		0 8px 24px rgba(0, 0, 0, 0.35);
 	transform-origin: bottom right;
 	animation: ic-tray-in 0.18s ease-out;
 	z-index: 50;
