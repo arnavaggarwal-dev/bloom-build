@@ -162,6 +162,10 @@ fn main() {
             activate_tray_icon,
             #[cfg(windows)]
             open_system_action,
+            #[cfg(windows)]
+            show_app_menu,
+            #[cfg(windows)]
+            toggle_touch_keyboard,
             get_app_icon,
             get_installed_apps,
             save_pinned_apps,

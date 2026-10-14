@@ -4,10 +4,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import "./Dock.css";
 import { initTheme } from "./theme";
-import { useSettingsSync } from "./hooks/useSettingsSync";
+import { useBoolSetting, useSettingsSync } from "./hooks/useSettingsSync";
 import { reloadIfMirrorWasStale } from "./hooks/settingsMirror";
 import { DOCK_SPRING, InfoLeft, InfoPanel, InfoProvider, InfoRight, type InfoTab } from "./InfoCentre";
-import { ChevronUp } from "lucide-react";
+import { ChevronUp, Copy, Keyboard } from "lucide-react";
 import { useGlass, useGlassEnabled, useInfoCentre } from "./hooks/useGlass";
 
 import { mergeTrayApps, selectDockTrayApps, type AppInfo, type TrayApp } from "./dockApps";
@@ -118,6 +118,32 @@ function WindowDots({ count, background }: { count: number; background?: boolean
 	);
 }
 
+// Progress and badge an app reports to the (hidden) Windows taskbar; see
+// taskbar_status_poller in services.rs.
+interface TaskbarStatus {
+	hwnds: number[];
+	progress: number | null;
+	state: string;
+	badge: boolean;
+}
+
+// The taskbar's progress bar along the icon's bottom edge (green, yellow when
+// paused, red on error, a shimmer while busy) and its badge, as a dot.
+function IconStatus({ status }: { status?: TaskbarStatus }) {
+	if (!status) return null;
+	const busy = status.state === "Busy";
+	return (
+		<>
+			{(busy || status.progress !== null) && (
+				<span className={`icon-progress ${status.state.toLowerCase()}`}>
+					<i style={busy ? undefined : { width: `${(status.progress ?? 0) * 100}%` }} />
+				</span>
+			)}
+			{status.badge && <span className="icon-badge" />}
+		</>
+	);
+}
+
 const Dock = memo(function Dock() {
 	useEffect(() => {
 		return initTheme();
@@ -151,6 +177,24 @@ const Dock = memo(function Dock() {
 		() => localStorage.getItem("bloom-dock-extras-position") || "off"
 	);
 	const [dockExtras, setDockExtras] = useState<DockExtra[]>([]);
+	const [startButton] = useBoolSetting("bloom-start-button", true);
+	const [desktopsButton] = useBoolSetting("bloom-desktops-button", true);
+	const [keyboardButton] = useBoolSetting("bloom-touch-keyboard-button", false);
+	// Windows flashing for attention until activated, and taskbar progress/badges.
+	const [flashing, setFlashing] = useState<Set<number>>(() => new Set());
+	const [taskbarStatus, setTaskbarStatus] = useState<TaskbarStatus[]>([]);
+	useEffect(() => {
+		const offs = [
+			listen<number>("window-flash", ({ payload: h }) =>
+				setFlashing((s) => (s.has(h) ? s : new Set(s).add(h)))
+			),
+			listen<number>("window-activated", ({ payload: h }) =>
+				setFlashing((s) => (s.has(h) ? new Set([...s].filter((x) => x !== h)) : s))
+			),
+			listen<TaskbarStatus[]>("taskbar-status", (e) => setTaskbarStatus(e.payload))
+		];
+		return () => offs.forEach((off) => off.then((f) => f()));
+	}, []);
 	const [dockExtrasRevision, setDockExtrasRevision] = useState(0);
 	const [isMaximized, setIsMaximized] = useState(false);
 	const [previewData, setPreviewData] = useState<{
@@ -759,12 +803,49 @@ const Dock = memo(function Dock() {
 		}
 	};
 
+	const hwndsOf = (app: AppInfo) => app.all_hwnds?.map(([hwnd]) => hwnd) ?? (app.hwnd ? [app.hwnd] : []);
+	const statusOf = (app: AppInfo) => {
+		const hwnds = hwndsOf(app);
+		return taskbarStatus.find((s) => s.hwnds.some((h) => hwnds.includes(h)));
+	};
+	const iconClass = (app: AppInfo) =>
+		hwndsOf(app).some((h) => flashing.has(h)) ? "dock-icon attention" : "dock-icon";
+
+	// Close every window of the item, like the taskbar's "Close all windows".
+	const closeAppWindows = (app: AppInfo) =>
+		Promise.all(hwndsOf(app).map((hwnd) => invoke("close_window", { hwnd })));
+
+	// The app's own menu, native like the taskbar's (recent items, new
+	// instance, pin, close). Where there is none (Linux), Bloom's menu.
+	const openAppMenu = async (e: React.MouseEvent, app: AppInfo) => {
+		const fallback = { x: e.clientX, y: e.clientY, app };
+		closeMenu();
+		setPreviewData(null);
+		try {
+			const action = await invoke<string>("show_app_menu", {
+				name: app.name,
+				path: app.path,
+				hwnds: hwndsOf(app),
+				pinned: !!app.is_pinned
+			});
+			if (action === "launch") handleNewInstance(app);
+			else if (action === "pin") void togglePin(app);
+			else if (action === "close") void closeAppWindows(app);
+		} catch {
+			setContextMenu(fallback);
+		}
+	};
+
 	const handleContextMenu = (e: React.MouseEvent, app: AppInfo | null) => {
 		e.stopPropagation();
 		e.preventDefault();
 		// Shift-right-click keeps Bloom pin/customization controls available.
 		if (app?.is_background && app.tray_ids?.length === 1 && !e.shiftKey) {
 			void openTrayMenu(app.tray_ids[0]);
+			return;
+		}
+		if (app && app.path !== "start" && !app.is_background && !e.shiftKey) {
+			void openAppMenu(e, app);
 			return;
 		}
 		setContextMenu({ x: e.clientX, y: e.clientY, app });
@@ -1116,6 +1197,58 @@ const Dock = memo(function Dock() {
 		tap: { scale: 0.95 }
 	};
 
+	// Start and Task View: fixed buttons with the app icons' hover and press.
+	const renderSystemItem = (
+		key: string,
+		label: string,
+		onClick: () => void,
+		icon: React.ReactNode,
+		onContextMenu?: (e: React.MouseEvent) => void
+	) => (
+		<motion.div
+			key={key}
+			initial={ITEM_INITIAL}
+			animate={ITEM_ANIMATE}
+			transition={ITEM_ENTRY_TRANSITION}
+			className="dock-icon-wrapper"
+			onContextMenu={onContextMenu}
+			onMouseEnter={() => setHoveredApp(key)}
+			onMouseLeave={() => {
+				setHoveredApp(null);
+				setPressedApp(null);
+			}}
+		>
+			{(!dockPreviewEnabled || hoveredApp === key) && <div className="tooltip">{label}</div>}
+			<motion.div
+				className="dock-icon"
+				variants={iconVariants}
+				animate={pressedApp === key ? "tap" : hoveredApp === key ? "hover" : "idle"}
+				onPointerDown={() => setPressedApp(key)}
+				onPointerUp={() => setPressedApp(null)}
+				onPointerCancel={() => setPressedApp(null)}
+				onClick={(e) => {
+					e.stopPropagation();
+					onClick();
+				}}
+			>
+				{icon}
+			</motion.div>
+		</motion.div>
+	);
+
+	const keyboardBtn = keyboardButton && (
+		<button
+			className="ic-tray-btn"
+			title="Touch keyboard"
+			onClick={(e) => {
+				e.stopPropagation();
+				invoke("toggle_touch_keyboard").catch(showActionError);
+			}}
+		>
+			<Keyboard size={16} />
+		</button>
+	);
+
 	const renderExtra = (extra: DockExtra) => (
 		<motion.div
 			key={extra.id}
@@ -1238,56 +1371,28 @@ const Dock = memo(function Dock() {
 								{infoCentre && (
 									<InfoLeft active={infoTab !== null && infoTab !== "controls"} onOpen={() => openInfo(infoTab && infoTab !== "controls" ? infoTab : "media")} />
 								)}
-								{startItem && (
-									<motion.div
-										initial={{ opacity: 0, scale: 0 }}
-										animate={{ opacity: 1, scale: 1 }}
-										transition={{
-											opacity: { duration: 0.15, delay: 0.15 },
-											scale: { type: "spring", stiffness: 400, damping: 25, delay: 0.15 }
-										}}
-										className="dock-icon-wrapper"
-										onContextMenu={(e) => handleContextMenu(e, startItem)}
-										onMouseEnter={() => setHoveredApp(itemKey(startItem))}
-										onMouseLeave={() => {
-											setHoveredApp(null);
-											setPressedApp(null);
-										}}
-									>
-										{(!dockPreviewEnabled ||
-											(dockPreviewEnabled && hoveredApp === itemKey(startItem))) && (
-											<div className="tooltip">{startItem.name}</div>
-										)}
-										<motion.div
-											className="dock-icon"
-											variants={iconVariants}
-											animate={
-												pressedApp === itemKey(startItem)
-													? "tap"
-													: hoveredApp === itemKey(startItem)
-														? "hover"
-														: "idle"
-											}
-											onPointerDown={() => setPressedApp(itemKey(startItem))}
-											onPointerUp={() => setPressedApp(null)}
-											onPointerCancel={() => setPressedApp(null)}
-											onClick={(e) => {
-												e.stopPropagation();
-												handleAppClick(startItem);
-											}}
-										>
-											<img
-												src={resolveStartIcon(startIcon)}
-												alt="Start"
-												className="bloom-icon-img"
-												style={
-													startIcon.startsWith("custom:") ? { borderRadius: "8px" } : undefined
-												}
-												draggable={false}
-											/>
-										</motion.div>
-									</motion.div>
-								)}
+								{startItem &&
+									startButton &&
+									renderSystemItem(
+										"start",
+										startItem.name,
+										() => handleAppClick(startItem),
+										<img
+											src={resolveStartIcon(startIcon)}
+											alt="Start"
+											className="bloom-icon-img"
+											style={startIcon.startsWith("custom:") ? { borderRadius: "8px" } : undefined}
+											draggable={false}
+										/>,
+										(e) => handleContextMenu(e, startItem)
+									)}
+								{desktopsButton &&
+									renderSystemItem(
+										"task-view",
+										"Task View",
+										() => invoke("open_app", { appName: "task-view" }),
+										<Copy />
+									)}
 
 								{dockExtrasPosition === "left" && dockExtras.length > 0 && (
 									<>
@@ -1403,7 +1508,7 @@ const Dock = memo(function Dock() {
 													<div className="tooltip">{app.name}</div>
 												)}
 												<motion.div
-													className="dock-icon"
+													className={iconClass(app)}
 													variants={iconVariants}
 													animate={
 														pressedApp === itemKey(app)
@@ -1453,6 +1558,7 @@ const Dock = memo(function Dock() {
 															<div className="fallback-icon">{app.name[0]}</div>
 														);
 													})()}
+													<IconStatus status={statusOf(app)} />
 												</motion.div>
 												{app.is_running && (
 													<WindowDots
@@ -1467,7 +1573,7 @@ const Dock = memo(function Dock() {
 
 								{dockSeparatorEnabled &&
 									unpinnedItems.length > 0 &&
-									(pinnedItems.length > 0 || startItem) && (
+									(pinnedItems.length > 0 || startButton || desktopsButton) && (
 										<div
 											className="dock-app-divider"
 											role="separator"
@@ -1565,7 +1671,7 @@ const Dock = memo(function Dock() {
 											<div className="tooltip">{app.name}</div>
 										)}
 										<motion.div
-											className="dock-icon"
+											className={iconClass(app)}
 											variants={iconVariants}
 											animate={
 												pressedApp === itemKey(app)
@@ -1610,6 +1716,7 @@ const Dock = memo(function Dock() {
 													<div className="fallback-icon">{app.name[0]}</div>
 												);
 											})()}
+											<IconStatus status={statusOf(app)} />
 										</motion.div>
 										{app.is_running && (
 											<WindowDots
@@ -1630,9 +1737,11 @@ const Dock = memo(function Dock() {
 										{dockExtras.map((extra) => renderExtra(extra))}
 									</>
 								)}
+								{!infoCentre && keyboardBtn}
 								{infoCentre && (
 									<>
 									<div className="ic-tray-wrap">
+										{keyboardBtn}
 										<button
 											className={`ic-tray-btn ${trayOpen ? "on" : ""}`}
 											title="Tray icons"
@@ -1888,12 +1997,7 @@ const Dock = memo(function Dock() {
 									<div
 										className="menu-item quit"
 										onClick={async () => {
-											// Close every window of the item, like the taskbar's
-											// "Close all windows", not just the first one.
-											const app = contextMenu.app;
-											const hwnds =
-												app?.all_hwnds?.map(([hwnd]) => hwnd) ?? (app?.hwnd ? [app.hwnd] : []);
-											await Promise.all(hwnds.map((hwnd) => invoke("close_window", { hwnd })));
+											await closeAppWindows(contextMenu.app!);
 											closeMenu();
 										}}
 									>
