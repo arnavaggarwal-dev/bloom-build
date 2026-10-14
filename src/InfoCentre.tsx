@@ -27,7 +27,8 @@ import {
 	VolumeX,
 	X,
 	Wifi,
-	WifiOff
+	WifiOff,
+	EthernetPort
 } from "lucide-react";
 import { useWeather } from "./hooks/useWeather";
 import { useSettingsSync } from "./hooks/useSettingsSync";
@@ -101,6 +102,7 @@ function useInfoData() {
 	const [muted, setMuted] = useState(false);
 	const [brightness, setBrightnessState] = useState(50);
 	const [wifi, setWifi] = useState(true);
+	const [ethernet, setEthernet] = useState(false);
 	const [bluetooth, setBluetooth] = useState(false);
 
 	const [weatherEnabled, setWeatherEnabled] = useState(() =>
@@ -168,8 +170,11 @@ function useInfoData() {
 
 		// Wifi, bluetooth and power mode have no change events.
 		const pollStates = () => {
-			invoke<{ enabled: boolean }>("get_wifi_status")
-				.then((s) => setWifi(s.enabled))
+			invoke<{ enabled: boolean; ethernet?: boolean }>("get_wifi_status")
+				.then((s) => {
+					setWifi(s.enabled);
+					setEthernet(!!s.ethernet);
+				})
 				.catch(() => {});
 			invoke<boolean>("get_bluetooth_state")
 				.then(setBluetooth)
@@ -229,6 +234,7 @@ function useInfoData() {
 		brightnessError,
 		syncLevels,
 		wifi,
+		ethernet,
 		bluetooth,
 		weather,
 		weatherEnabled,
@@ -356,7 +362,7 @@ export function InfoLeft({ active, onOpen }: ZoneProps) {
 }
 
 export function InfoRight({ active, onOpen }: ZoneProps) {
-	const { wifi, volume, muted, battery } = useInfo();
+	const { wifi, ethernet, volume, muted, battery } = useInfo();
 	const VolumeIcon = muted || volume === 0 ? VolumeX : volume < 0.5 ? Volume1 : Volume2;
 	const BatteryIcon = !battery
 		? BatteryFull
@@ -369,7 +375,7 @@ export function InfoRight({ active, onOpen }: ZoneProps) {
 					: BatteryFull;
 	return (
 		<div className={`ic-zone ${active ? "active" : ""}`} onMouseEnter={onOpen}>
-			{wifi ? <Wifi size={16} /> : <WifiOff size={16} className="ic-dim" />}
+			{ethernet ? <EthernetPort size={16} /> : wifi ? <Wifi size={16} /> : <WifiOff size={16} className="ic-dim" />}
 			<VolumeIcon size={16} />
 			{battery && (
 				<span className="ic-batt">

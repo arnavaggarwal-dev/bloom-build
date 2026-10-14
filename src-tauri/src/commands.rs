@@ -3315,7 +3315,12 @@ pub async fn get_wifi_status() -> Result<WifiStatus, String> {
     tauri::async_runtime::spawn_blocking(|| -> Result<WifiStatus, String> {
         let enabled = get_radio_state_sync(windows::Devices::Radios::RadioKind::WiFi)?;
         let connected = enabled && is_wlan_connected_sync();
-        Ok(WifiStatus { enabled, connected })
+        // The adapter carrying the internet connection; IANA type 6 is Ethernet.
+        let ethernet = windows::Networking::Connectivity::NetworkInformation::GetInternetConnectionProfile()
+            .and_then(|p| p.NetworkAdapter())
+            .and_then(|a| a.IanaInterfaceType())
+            .is_ok_and(|t| t == 6);
+        Ok(WifiStatus { enabled, connected, ethernet })
     })
     .await
     .map_err(|e| e.to_string())?

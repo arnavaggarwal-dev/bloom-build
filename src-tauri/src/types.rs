@@ -83,6 +83,8 @@ pub struct VolumeChangeEvent {
 pub struct WifiStatus {
     pub enabled: bool,
     pub connected: bool,
+    /// The internet connection runs over a cable, whatever the Wi-Fi radio does.
+    pub ethernet: bool,
 }
 
 #[derive(Clone, Serialize)]

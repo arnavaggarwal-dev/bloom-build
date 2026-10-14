@@ -1951,7 +1951,7 @@ pub mod cmds {
             let connected = enabled
                 && run("nmcli", &["-t", "-f", "TYPE,STATE", "device"])
                     .is_some_and(|s| s.lines().any(|l| l.starts_with("wifi:connected")));
-            WifiStatus { enabled, connected }
+            WifiStatus { enabled, connected, ethernet: false }
         })
         .await
         .map_err(|e| e.to_string())
