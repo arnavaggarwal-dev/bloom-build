@@ -403,21 +403,36 @@ fn taskbar_status_poller(app: AppHandle) {
             return;
         };
         let mut last_empty = true;
+        // The full-tree search walks Explorer's whole taskbar (costly on both
+        // sides), so it runs every 6 s; in between only the progress/badge
+        // elements already found are re-read, and only while there are some.
+        // ponytail: polling; a UIA structure-changed handler would make it free.
+        let mut cached: Option<IUIAutomationElementArray> = None;
+        let mut searched: Option<std::time::Instant> = None;
         loop {
             std::thread::sleep(Duration::from_millis(1500));
+            let search_due = searched.is_none_or(|t| t.elapsed() >= Duration::from_secs(6));
+            if !search_due && cached.is_none() {
+                continue;
+            }
+            if search_due {
+                searched = Some(std::time::Instant::now());
+                cached = FindWindowW(w!("Shell_TrayWnd"), PCWSTR::null())
+                    .and_then(|tray| {
+                        FindWindowExW(
+                            Some(tray),
+                            None,
+                            w!("Windows.UI.Composition.DesktopWindowContentBridge"),
+                            PCWSTR::null(),
+                        )
+                    })
+                    .and_then(|bridge| uia.ElementFromHandle(bridge))
+                    .and_then(|root| root.FindAll(TreeScope_Descendants, &either))
+                    .ok()
+                    .filter(|found| found.Length().unwrap_or(0) > 0);
+            }
             let mut by_app: Vec<(String, TaskbarStatus)> = Vec::new();
-            let found = FindWindowW(w!("Shell_TrayWnd"), PCWSTR::null())
-                .and_then(|tray| {
-                    FindWindowExW(
-                        Some(tray),
-                        None,
-                        w!("Windows.UI.Composition.DesktopWindowContentBridge"),
-                        PCWSTR::null(),
-                    )
-                })
-                .and_then(|bridge| uia.ElementFromHandle(bridge))
-                .and_then(|root| root.FindAll(TreeScope_Descendants, &either));
-            if let Ok(found) = found {
+            if let Some(found) = &cached {
                 for i in 0..found.Length().unwrap_or(0) {
                     let Ok(el) = found.GetElement(i) else { continue };
                     let Some(app_id) = walker
