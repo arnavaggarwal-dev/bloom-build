@@ -3723,8 +3723,14 @@ pub fn reconcile_main_appbar(app: &AppHandle) {
     let _guard = lock_main_appbar();
     let mode = get_setting_str(app, "bloom-notch-mode");
     if let Some(main_win) = app.get_webview_window("main") {
-        set_main_appbar_reservation(main_win, notch_mode_reserves_work_area(mode.as_deref()));
+        set_main_appbar_reservation(main_win, notch_mode_reserves_work_area(mode.as_deref()) && !merged_into_dock(app));
     }
+}
+
+/// Merged into the dock, the notch draws nothing: it must not keep a band of
+/// the screen reserved at the top either, whatever its mode.
+fn merged_into_dock(app: &AppHandle) -> bool {
+    get_setting_str(app, "bloom-info-centre").as_deref() == Some("true")
 }
 
 /// Apply an explicit mode to the main AppBar. `change_notch_mode` knows the
@@ -3733,7 +3739,7 @@ pub fn reconcile_main_appbar(app: &AppHandle) {
 pub fn apply_main_appbar_mode(app: &AppHandle, reserve: bool) {
     let _guard = lock_main_appbar();
     if let Some(main_win) = app.get_webview_window("main") {
-        set_main_appbar_reservation(main_win, reserve);
+        set_main_appbar_reservation(main_win, reserve && !merged_into_dock(app));
     }
 }
 

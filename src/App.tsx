@@ -1038,6 +1038,12 @@ function App() {
 		setTimeout(() => invoke("sync_appbar"), 200);
 	}, [dockMode, windowLabel]);
 
+	// Merging into the dock (or back) frees or restores the notch's reserved
+	// band at the top; the backend decides from the saved setting.
+	useEffect(() => {
+		if (windowLabel === "main") invoke("sync_appbar").catch(() => {});
+	}, [infoCentre, windowLabel]);
+
 	// Side effects: notch-mode (skip first render)
 	useEffect(() => {
 		if (windowLabel !== "main") return;

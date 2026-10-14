@@ -1766,9 +1766,11 @@ const Dock = memo(function Dock() {
 															setTrayOpen(false);
 															invoke("activate_tray_icon", { trayId: app.tray_ids[0] }).catch(showActionError);
 														}}
+														// The app's tray menu opens over the grid, which stays
+														// open (openTrayMenu would close every Bloom menu first).
 														onContextMenu={(e) => {
 															e.preventDefault();
-															void openTrayMenu(app.tray_ids[0]);
+															invoke("show_tray_context_menu", { trayId: app.tray_ids[0] }).catch(showActionError);
 														}}
 													>
 														{trayIcons[app.path] ? <img src={trayIcons[app.path]!} alt="" /> : <span>{app.name.slice(0, 1)}</span>}

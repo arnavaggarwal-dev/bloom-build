@@ -78,6 +78,7 @@ windows = { version = "0.61", features = [
 	"Foundation",
 	"Devices_WiFi",
 	"Devices_Enumeration",
+	"Foundation_Collections",
 	"Networking_Connectivity",
 	"Security_Credentials"
 ] }
