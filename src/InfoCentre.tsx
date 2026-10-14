@@ -59,7 +59,7 @@ function TileMore({ title, onOpen }: { title: string; onOpen: () => void }) {
 
 export type InfoTab = "media" | "calendar" | "timer" | "controls" | "shelf";
 
-const TABS: [InfoTab, string][] = [
+const ALL_TABS: [InfoTab, string][] = [
 	["media", "Now playing"],
 	["calendar", "Calendar"],
 	["timer", "Timer"],
@@ -405,7 +405,23 @@ interface PanelProps {
 // Every tab is 300px tall.
 const PANEL_HEIGHT = 300;
 
+/** The tabs the user hid (Settings, Notch). Controls can never be hidden. */
+export const HIDDEN_TABS_KEY = "bloom-ic-hidden-tabs";
+const readHidden = (v: unknown) => String(v ?? "").split(",").filter((t) => t && t !== "controls");
+function useHiddenTabs() {
+	const [hidden, setHidden] = useState(() => readHidden(localStorage.getItem(HIDDEN_TABS_KEY)));
+	useSettingsSync({ [HIDDEN_TABS_KEY]: (v) => setHidden(readHidden(v)) });
+	return hidden;
+}
+
 export function InfoPanel({ tab, setTab, onResize }: PanelProps) {
+	const hidden = useHiddenTabs();
+	const TABS = ALL_TABS.filter(([id]) => !hidden.includes(id));
+	// Hidden while open (or opened onto a hidden tab): the first one left
+	// (Controls at worst, which can't be hidden).
+	useEffect(() => {
+		if (hidden.includes(tab)) setTab(TABS[0][0]);
+	}, [tab, hidden]);
 	const ref = useRef<HTMLDivElement>(null);
 	useEffect(() => {
 		if (!ref.current) return;

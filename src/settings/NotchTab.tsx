@@ -11,9 +11,12 @@ import {
 	CloudSun,
 	Timer,
 	Archive,
-	X
+	X,
+	SlidersHorizontal
 } from "lucide-react";
+import { useState } from "react";
 import { SettingRow } from "./SettingRow";
+import { saveSetting } from "./useSettings";
 import { StatusWidgetConfig } from "../components/StatusWidgetConfig";
 import type { WidgetConfig } from "./types";
 
@@ -111,6 +114,7 @@ export function NotchTab({
 						<span className="slider"></span>
 					</label>
 				</SettingRow>
+				{infoCentre && <InfoTabRows />}
 
 				<SettingRow icon={PanelTop} label="Notch Behavior" desc="Choose how the notch appears">
 					<select
@@ -329,6 +333,45 @@ export function NotchTab({
 			<div className="setting-group">
 				<StatusWidgetConfig value={statusWidgets} onChange={handleWidgetsChange} />
 			</div>
+		</>
+	);
+}
+
+// The merged info centre's tabs: each can be hidden except Controls, which
+// always stays (power, Wi-Fi, volume...). Read by InfoCentre.tsx's InfoPanel.
+const HIDDEN_TABS_KEY = "bloom-ic-hidden-tabs";
+const INFO_TABS = [
+	{ id: "media", label: "Now Playing", icon: Music },
+	{ id: "calendar", label: "Calendar", icon: Calendar },
+	{ id: "timer", label: "Timer", icon: Timer },
+	{ id: "shelf", label: "Shelf", icon: Archive }
+];
+
+function InfoTabRows() {
+	const [hidden, setHidden] = useState(() =>
+		(localStorage.getItem(HIDDEN_TABS_KEY) ?? "").split(",").filter(Boolean)
+	);
+	const toggle = (id: string) => {
+		const next = hidden.includes(id) ? hidden.filter((t) => t !== id) : [...hidden, id];
+		setHidden(next);
+		saveSetting(HIDDEN_TABS_KEY, next.join(","));
+	};
+	return (
+		<>
+			{INFO_TABS.map(({ id, label, icon }) => (
+				<SettingRow key={id} icon={icon} label={`${label} Tab`} desc="Show this tab in the info centre">
+					<label className="toggle-switch">
+						<input type="checkbox" checked={!hidden.includes(id)} onChange={() => toggle(id)} />
+						<span className="slider"></span>
+					</label>
+				</SettingRow>
+			))}
+			<SettingRow icon={SlidersHorizontal} label="Controls Tab" desc="Always shown">
+				<label className="toggle-switch">
+					<input type="checkbox" checked disabled />
+					<span className="slider"></span>
+				</label>
+			</SettingRow>
 		</>
 	);
 }
