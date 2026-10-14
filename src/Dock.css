@@ -1562,3 +1562,94 @@ html.glass:not(.no-blur).light-mode .ic-zone.active {
 .ic-shelf .shelf-tile:hover .shelf-tile-remove {
 	opacity: 1;
 }
+
+/* Merged mode's tray: a ^ button before the controls zone, opening a grid of
+   every tray icon (the dock itself only shows the few with a window). */
+.ic-tray-wrap {
+	position: relative;
+	margin-left: auto;
+	display: flex;
+	align-items: center;
+}
+.ic-tray-wrap + .ic-zone {
+	margin-left: 4px;
+}
+.ic-tray-btn {
+	width: 28px;
+	height: 28px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 0;
+	border: none;
+	border-radius: 9px;
+	background: transparent;
+	color: inherit;
+	cursor: pointer;
+	transition: background 0.15s;
+}
+.ic-tray-btn:hover,
+.ic-tray-btn.on {
+	background: rgba(127, 127, 127, 0.16);
+}
+.ic-tray-btn svg {
+	transition: transform 0.2s ease;
+}
+.ic-tray-btn.on svg {
+	transform: rotate(180deg);
+}
+.ic-tray-pop {
+	position: absolute;
+	bottom: calc(100% + 12px);
+	right: 0;
+	display: grid;
+	grid-template-columns: repeat(5, 34px);
+	gap: 4px;
+	padding: 8px;
+	border-radius: 14px;
+	background: var(--bloom-bg, rgba(0, 0, 0, 0.8));
+	color: var(--bloom-text, white);
+	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+	transform-origin: bottom right;
+	animation: ic-tray-in 0.18s ease-out;
+	z-index: 50;
+}
+@keyframes ic-tray-in {
+	from {
+		opacity: 0;
+		transform: scale(0.92) translateY(4px);
+	}
+}
+html.glass:not(.no-blur) .ic-tray-pop {
+	background-color: color-mix(in srgb, var(--bloom-bg, rgba(0, 0, 0, 0.8)) 52%, transparent);
+	backdrop-filter: blur(24px) saturate(160%);
+}
+.ic-tray-item {
+	width: 34px;
+	height: 34px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 0;
+	border: none;
+	border-radius: 9px;
+	background: transparent;
+	color: inherit;
+	font-size: 13px;
+	font-weight: 600;
+	cursor: pointer;
+}
+.ic-tray-item:hover {
+	background: rgba(127, 127, 127, 0.2);
+}
+.ic-tray-item img {
+	width: 20px;
+	height: 20px;
+	object-fit: contain;
+}
+.ic-tray-empty {
+	grid-column: 1 / -1;
+	font-size: 12px;
+	opacity: 0.7;
+	padding: 4px;
+}

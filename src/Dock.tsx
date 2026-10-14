@@ -7,6 +7,7 @@ import { initTheme } from "./theme";
 import { useSettingsSync } from "./hooks/useSettingsSync";
 import { reloadIfMirrorWasStale } from "./hooks/settingsMirror";
 import { DOCK_SPRING, InfoLeft, InfoPanel, InfoProvider, InfoRight, type InfoTab } from "./InfoCentre";
+import { ChevronUp } from "lucide-react";
 import { useGlass, useGlassEnabled, useInfoCentre } from "./hooks/useGlass";
 
 import { mergeTrayApps, selectDockTrayApps, type AppInfo, type TrayApp } from "./dockApps";
@@ -161,6 +162,12 @@ const Dock = memo(function Dock() {
 	const [isOverlapped, setIsOverlapped] = useState(false);
 	const [isVisible, setIsVisible] = useState(true);
 	const [showAddPopup, setShowAddPopup] = useState(false);
+	// Every tray icon, for the ^ popover (merged mode): the dock itself only
+	// shows the few tray apps that have had a window or are pinned.
+	const [trayAll, setTrayAll] = useState<TrayApp[]>([]);
+	const [trayOpen, setTrayOpen] = useState(false);
+	const [trayIcons, setTrayIcons] = useState<Record<string, string | null>>({});
+	const trayRef = useRef<HTMLDivElement>(null);
 	const [contextMenu, setContextMenu] = useState<{
 		x: number;
 		y: number;
@@ -544,6 +551,7 @@ const Dock = memo(function Dock() {
 				)
 			);
 			observedTrayPathsRef.current = selected.observed;
+			setTrayAll(tray);
 			const running = mergeTrayApps(windows, selected.visible);
 			setActiveApps(running);
 
@@ -808,6 +816,7 @@ const Dock = memo(function Dock() {
 	}, [contextMenu, scale]);
 
 	const closeMenu = () => {
+		setTrayOpen(false);
 		setContextMenu(null);
 		setActiveSubmenu(null);
 		invoke("set_menu_open", { open: false, rect: null }).catch(() => {});
@@ -831,6 +840,10 @@ const Dock = memo(function Dock() {
 				height: Math.round(r.height)
 			};
 			open = true;
+		} else if (trayOpen && trayRef.current) {
+			const r = trayRef.current.getBoundingClientRect();
+			rect = { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) };
+			open = true;
 		} else if (showAddPopup && popupRef.current) {
 			const r = popupRef.current.getBoundingClientRect();
 			rect = {
@@ -843,7 +856,28 @@ const Dock = memo(function Dock() {
 		}
 
 		invoke("set_menu_open", { open, rect }).catch(() => {});
-	}, [contextMenu, menuPos, showAddPopup, pinnedApps, activeApps, activeSubmenu, scale]);
+	}, [contextMenu, menuPos, showAddPopup, pinnedApps, activeApps, activeSubmenu, scale, trayOpen, trayAll]);
+
+	// The tray popover: icons fetched once per app; any click outside it, or
+	// the bar collapsing, closes it.
+	useEffect(() => {
+		if (!trayOpen) return;
+		for (const app of trayAll) {
+			if (app.path in trayIcons) continue;
+			setTrayIcons((t) => ({ ...t, [app.path]: null }));
+			invoke<string | null>("get_app_icon", { path: app.path })
+				.then((icon) => setTrayIcons((t) => ({ ...t, [app.path]: icon })))
+				.catch(() => {});
+		}
+		const outside = (e: MouseEvent) => {
+			if (!trayRef.current?.parentElement?.contains(e.target as Node)) setTrayOpen(false);
+		};
+		document.addEventListener("mousedown", outside);
+		return () => document.removeEventListener("mousedown", outside);
+	}, [trayOpen, trayAll]);
+	useEffect(() => {
+		if (!isExpanded || isHidden) setTrayOpen(false);
+	}, [isExpanded, isHidden]);
 
 	const dockItems = useMemo(() => {
 		const runningMap = new Map();
@@ -1597,7 +1631,43 @@ const Dock = memo(function Dock() {
 									</>
 								)}
 								{infoCentre && (
+									<>
+									<div className="ic-tray-wrap">
+										<button
+											className={`ic-tray-btn ${trayOpen ? "on" : ""}`}
+											title="Tray icons"
+											onClick={(e) => {
+												e.stopPropagation();
+												setTrayOpen((o) => !o);
+											}}
+										>
+											<ChevronUp size={16} />
+										</button>
+										{trayOpen && (
+											<div ref={trayRef} className="ic-tray-pop" onClick={(e) => e.stopPropagation()}>
+												{trayAll.length === 0 && <span className="ic-tray-empty">No tray icons</span>}
+												{trayAll.map((app) => (
+													<button
+														key={app.tray_ids[0] ?? app.path}
+														className="ic-tray-item"
+														title={app.name}
+														onClick={() => {
+															setTrayOpen(false);
+															invoke("activate_tray_icon", { trayId: app.tray_ids[0] }).catch(showActionError);
+														}}
+														onContextMenu={(e) => {
+															e.preventDefault();
+															void openTrayMenu(app.tray_ids[0]);
+														}}
+													>
+														{trayIcons[app.path] ? <img src={trayIcons[app.path]!} alt="" /> : <span>{app.name.slice(0, 1)}</span>}
+													</button>
+												))}
+											</div>
+										)}
+									</div>
 									<InfoRight active={infoTab === "controls"} onOpen={() => openInfo("controls")} />
+									</>
 								)}
 							</motion.div>
 						)}
