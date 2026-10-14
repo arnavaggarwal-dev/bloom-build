@@ -411,8 +411,19 @@ fn taskbar_status_poller(app: AppHandle) {
         let mut searched: Option<std::time::Instant> = None;
         loop {
             std::thread::sleep(Duration::from_millis(1500));
-            let search_due = searched.is_none_or(|t| t.elapsed() >= Duration::from_secs(6));
-            if !search_due && cached.is_none() {
+            // Opt-in (Settings, Appearance): each search costs Bloom ~0.5 s and
+            // Explorer ~0.3 s of CPU. Off: nothing is searched, and any status
+            // still shown is cleared once.
+            let enabled = crate::utils::get_setting_str(&app, "bloom-taskbar-status").as_deref() == Some("true");
+            if !enabled {
+                cached = None;
+                searched = None;
+                if last_empty {
+                    continue;
+                }
+            }
+            let search_due = enabled && searched.is_none_or(|t| t.elapsed() >= Duration::from_secs(6));
+            if enabled && !search_due && cached.is_none() {
                 continue;
             }
             if search_due {

@@ -1,4 +1,4 @@
-import { Palette, Droplet, Contrast, Droplets, Sun, Square, Maximize2, Sparkles, LayoutGrid, Copy, Keyboard } from "lucide-react";
+import { Palette, Droplet, Contrast, Droplets, Sun, Square, Maximize2, Sparkles, LayoutGrid, Copy, Keyboard, Activity } from "lucide-react";
 import { SettingRow } from "./SettingRow";
 import { saveSetting } from "./useSettings";
 import { useBoolSetting } from "../hooks/useSettingsSync";
@@ -212,6 +212,13 @@ export function AppearanceTab({
 					icon={Keyboard}
 					label="Touch keyboard button"
 					desc="Shows or hides the on-screen keyboard"
+				/>
+				<DockButtonToggle
+					setting="bloom-taskbar-status"
+					fallback={false}
+					icon={Activity}
+					label="Progress and badges"
+					desc="Download progress and unread dots on icons. Reads the hidden Windows taskbar every few seconds, which uses some CPU"
 					divider={false}
 				/>
 			</div>
