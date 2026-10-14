@@ -2683,7 +2683,18 @@ fn update_main_interaction(
     let final_ignore = !is_click_interactive;
     let prev_ignore = MH_LAST_MAIN_IGNORE.load(Ordering::Relaxed);
     let new_ignore = if final_ignore { 1 } else { 0 };
-    if prev_ignore != new_ignore {
+    // Trust the window, not the cache: if its click-through flag was lost
+    // behind our back, the cache still said "ignoring" and the 420 px notch
+    // window (empty while merged) kept swallowing every click at the top of
+    // the screen. One style read per call heals it within a poll (40 ms).
+    #[cfg(windows)]
+    let drifted = main_win.hwnd().is_ok_and(|h| unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{GetWindowLongPtrW, GWL_EXSTYLE, WS_EX_TRANSPARENT};
+        ((GetWindowLongPtrW(h, GWL_EXSTYLE) as u32 & WS_EX_TRANSPARENT.0) != 0) != final_ignore
+    });
+    #[cfg(not(windows))]
+    let drifted = false;
+    if prev_ignore != new_ignore || drifted {
         // Z-order re-assertion is a synchronous window operation; skip it
         // while a drag may be active, where it can visibly hitch the drag.
         if !drag_held {
