@@ -87,17 +87,16 @@ mod imp {
 
     // ── Wi-Fi ────────────────────────────────────────────────────────────────
 
+    const LOCATION: &str = "Windows didn't allow Bloom to see Wi-Fi networks. Turn on Location \
+        and \"Let desktop apps access your location\" in Windows privacy settings.";
+
     fn adapter() -> Result<WiFiAdapter, String> {
         com();
         let access = WiFiAdapter::RequestAccessAsync()
             .and_then(|o| o.get())
             .map_err(err)?;
         if access != WiFiAccessStatus::Allowed {
-            return Err(
-                "Windows didn't allow Bloom to see Wi-Fi networks. Turn on Location \
-                        and \"Let desktop apps access your location\" in Windows privacy settings."
-                    .into(),
-            );
+            return Err(LOCATION.into());
         }
         let adapters = WiFiAdapter::FindAllAdaptersAsync()
             .and_then(|o| o.get())
@@ -107,65 +106,6 @@ mod imp {
             .map_err(|_| "No Wi-Fi adapter.".to_string())
     }
 
-    fn connected_ssid(a: &WiFiAdapter) -> Option<String> {
-        let profile = a
-            .NetworkAdapter()
-            .ok()?
-            .GetConnectedProfileAsync()
-            .ok()?
-            .get()
-            .ok()?;
-        let ssid = profile
-            .WlanConnectionProfileDetails()
-            .ok()?
-            .GetConnectedSsid()
-            .ok()?;
-        Some(ssid.to_string())
-    }
-
-    /// The names of the saved Wi-Fi profiles (each is named after its SSID).
-    fn saved_profiles() -> Vec<String> {
-        use windows::Win32::Foundation::HANDLE;
-        use windows::Win32::NetworkManagement::WiFi::{
-            WlanCloseHandle, WlanEnumInterfaces, WlanFreeMemory, WlanGetProfileList,
-            WlanOpenHandle, WLAN_INTERFACE_INFO_LIST, WLAN_PROFILE_INFO_LIST,
-        };
-        let mut names = Vec::new();
-        unsafe {
-            let mut version = 0u32;
-            let mut handle = HANDLE::default();
-            if WlanOpenHandle(2, None, &mut version, &mut handle) != 0 {
-                return names;
-            }
-            let mut ifaces: *mut WLAN_INTERFACE_INFO_LIST = std::ptr::null_mut();
-            if WlanEnumInterfaces(handle, None, &mut ifaces) == 0 && !ifaces.is_null() {
-                let list = std::slice::from_raw_parts(
-                    (*ifaces).InterfaceInfo.as_ptr(),
-                    (*ifaces).dwNumberOfItems as usize,
-                );
-                for iface in list {
-                    let mut profiles: *mut WLAN_PROFILE_INFO_LIST = std::ptr::null_mut();
-                    if WlanGetProfileList(handle, &iface.InterfaceGuid, None, &mut profiles) == 0
-                        && !profiles.is_null()
-                    {
-                        let items = std::slice::from_raw_parts(
-                            (*profiles).ProfileInfo.as_ptr(),
-                            (*profiles).dwNumberOfItems as usize,
-                        );
-                        for p in items {
-                            let end = p.strProfileName.iter().position(|&c| c == 0).unwrap_or(256);
-                            names.push(String::from_utf16_lossy(&p.strProfileName[..end]));
-                        }
-                        WlanFreeMemory(profiles as *const _);
-                    }
-                }
-                WlanFreeMemory(ifaces as *const _);
-            }
-            WlanCloseHandle(handle, None);
-        }
-        names
-    }
-
     fn report(a: &WiFiAdapter) -> Vec<WiFiAvailableNetwork> {
         a.NetworkReport()
             .and_then(|r| r.AvailableNetworks())
@@ -173,33 +113,40 @@ mod imp {
             .unwrap_or_default()
     }
 
+    /// Windows' own list from its last scan (wifi.rs, the WLAN API): instant,
+    /// with an exact "saved" flag and one entry per network. A fresh scan
+    /// goes separately (wifi_scan); its result arrives as "wifi-changed".
     pub fn wifi_networks() -> Result<Vec<WifiNetwork>, String> {
-        let a = adapter()?;
-        a.ScanAsync().and_then(|o| o.get()).map_err(err)?;
-        let connected = connected_ssid(&a);
-        let saved = saved_profiles();
-        let list = report(&a)
-            .into_iter()
-            .filter_map(|n| {
-                let ssid = n.Ssid().ok()?.to_string();
-                let auth = n
-                    .SecuritySettings()
-                    .and_then(|s| s.NetworkAuthenticationType())
-                    .unwrap_or(Auth::None);
-                Some(WifiNetwork {
-                    connected: connected.as_deref() == Some(ssid.as_str()),
-                    saved: saved.contains(&ssid),
-                    bars: n.SignalBars().unwrap_or(0).min(4),
-                    secure: !matches!(auth, Auth::None | Auth::Open80211 | Auth::Unknown),
-                    enterprise: matches!(
-                        auth,
-                        Auth::Rsna | Auth::Wpa | Auth::Wpa3Enterprise | Auth::Wpa3Enterprise192Bits
-                    ),
-                    ssid,
+        let list = crate::wifi::list_sync()?;
+        if list.location_denied {
+            return Err(LOCATION.into());
+        }
+        Ok(dedupe(
+            list.networks
+                .into_iter()
+                .map(|n| WifiNetwork {
+                    bars: ((n.signal + 12) / 25).min(4) as u8,
+                    // OWE encrypts without a password.
+                    secure: !matches!(n.security, "open" | "owe"),
+                    enterprise: n.security == "enterprise",
+                    connected: n.connected,
+                    saved: n.saved,
+                    ssid: n.ssid,
                 })
-            })
-            .collect();
-        Ok(dedupe(list))
+                .collect(),
+        ))
+    }
+
+    pub fn wifi_scan() -> Result<(), String> {
+        crate::wifi::scan_sync()
+    }
+
+    pub fn wifi_forget(ssid: &str) -> Result<(), String> {
+        crate::wifi::forget_sync(ssid)
+    }
+
+    fn saved(ssid: &str) -> bool {
+        crate::wifi::list_sync().is_ok_and(|l| l.networks.iter().any(|n| n.ssid == ssid && n.saved))
     }
 
     pub fn wifi_connect(ssid: &str, password: Option<&str>) -> JoinResult {
@@ -216,6 +163,16 @@ mod imp {
                 find(&a).ok_or("That network is out of range.")?
             }
         };
+        let personal = network
+            .SecuritySettings()
+            .and_then(|s| s.NetworkAuthenticationType())
+            .is_ok_and(|t| matches!(t, Auth::RsnaPsk | Auth::WpaPsk | Auth::Wpa3Sae));
+        if let Some(pw) = password {
+            if personal && !crate::wifi::valid_passphrase(pw) {
+                return Err("Wi-Fi passwords are 8 to 63 characters.".into());
+            }
+        }
+        let was_saved = saved(ssid);
         let op = match password {
             Some(pw) => {
                 let cred = PasswordCredential::new().map_err(err)?;
@@ -232,6 +189,11 @@ mod imp {
             .and_then(|o| o.get())
             .and_then(|r| r.ConnectionStatus())
             .map_err(err)?;
+        // A typed password that failed must not stay saved: Windows would keep
+        // retrying the wrong key. A profile that existed before is left alone.
+        if status != WiFiConnectionStatus::Success && password.is_some() && !was_saved && saved(ssid) {
+            let _ = crate::wifi::forget_sync(ssid);
+        }
         match status {
             WiFiConnectionStatus::Success => Ok("connected".into()),
             WiFiConnectionStatus::InvalidCredential => Ok("password".into()),
@@ -700,6 +662,14 @@ mod imp {
         }
     }
 
+    pub fn wifi_scan() -> Result<(), String> {
+        Ok(())
+    }
+
+    pub fn wifi_forget(ssid: &str) -> Result<(), String> {
+        run("nmcli", &["connection", "delete", "id", ssid]).map(|_| ())
+    }
+
     pub fn wifi_disconnect() -> Result<(), String> {
         let iface = run("nmcli", &["-t", "-f", "DEVICE,TYPE", "device"])?
             .lines()
@@ -842,6 +812,17 @@ pub async fn wifi_join(ssid: String, password: Option<String>) -> JoinResult {
 #[tauri::command]
 pub async fn wifi_leave() -> Result<(), String> {
     blocking(imp::wifi_disconnect).await
+}
+
+/// A fresh scan; on Windows the result arrives as "wifi-changed" (wifi.rs).
+#[tauri::command]
+pub async fn wifi_rescan() -> Result<(), String> {
+    blocking(imp::wifi_scan).await
+}
+
+#[tauri::command]
+pub async fn wifi_forget_saved(ssid: String) -> Result<(), String> {
+    blocking(move || imp::wifi_forget(&ssid)).await
 }
 
 /// Starts streaming the device list to the calling window (see imp::bt_watch).

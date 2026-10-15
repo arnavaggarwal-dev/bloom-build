@@ -207,6 +207,8 @@ fn main() {
             connect::wifi_networks,
             connect::wifi_join,
             connect::wifi_leave,
+            connect::wifi_rescan,
+            connect::wifi_forget_saved,
             connect::bt_watch,
             connect::bt_unwatch,
             connect::bt_pair,

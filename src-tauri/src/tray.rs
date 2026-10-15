@@ -499,23 +499,44 @@ unsafe fn matches_icon_label(label: &str, target: &Icon) -> bool {
     (!friendly.is_empty() && name.contains(&friendly)) || (!stem.is_empty() && name.contains(&stem))
 }
 
-/// Shell_NotifyIconGetRect points at the chevron for hidden icons. The live
-/// registry order and the overflow's UI Automation button order coincide;
-/// require equal counts and reject any contradictory name matches. An icon's
-/// tooltip is app-defined and often differs from its executable description
-/// (for example PhoneExperienceHost.exe displays "Phone Link - Disconnected"),
-/// so a missing name match is not by itself an identity failure.
+/// The button drawn over a point, given in physical or (for a scaled window)
+/// logical pixels.
+unsafe fn button_at(buttons: &[IUIAutomationElement], rect: RECT, dpi: f64) -> Option<&IUIAutomationElement> {
+    let cx = (rect.left + rect.right) as f64 / 2.0;
+    let cy = (rect.top + rect.bottom) as f64 / 2.0;
+    let hits: Vec<_> = buttons
+        .iter()
+        .filter(|button| {
+            let Ok(b) = button.CurrentBoundingRectangle() else { return false };
+            let hit = |x: f64, y: f64| {
+                x >= b.left as f64 && x < b.right as f64 && y >= b.top as f64 && y < b.bottom as f64
+            };
+            hit(cx, cy) || hit(cx * 96.0 / dpi, cy * 96.0 / dpi)
+        })
+        .collect();
+    match hits[..] {
+        [one] => Some(one),
+        _ => None,
+    }
+}
+
+/// Finds a hidden icon's button in the open overflow, most certain way first:
+/// where Windows says the icon is drawn (with the overflow open it reports the
+/// icon's own spot, closed it points at the chevron), then the one button whose
+/// label names the app, and only then position, by Explorer's saved order. That
+/// order is stale for an app started since Explorer last saved it, so those go
+/// last instead of failing; a label that contradicts a position still stops it,
+/// since opening the wrong app's menu is worse than opening none. An icon's
+/// tooltip is app-defined (PhoneExperienceHost.exe shows "Phone Link -
+/// Disconnected"), so a missing name match is not an identity failure.
 unsafe fn find_overflow_icon(
     automation: &IUIAutomation,
     icons: &[Icon],
     target: &Icon,
 ) -> Result<IUIAutomationElement3, String> {
-    let order = tray_order()?;
+    let order = tray_order().unwrap_or_default();
     let mut hidden: Vec<_> = icons.iter().filter(|icon| !icon.promoted).collect();
     hidden.sort_by_key(|icon| order.get(&icon.key).copied().unwrap_or(usize::MAX));
-    if hidden.iter().any(|icon| !order.contains_key(&icon.key)) {
-        return Err("Windows tray order changed. Please try again.".into());
-    }
     let position = hidden
         .iter()
         .position(|icon| icon.key == target.key)
@@ -553,10 +574,11 @@ unsafe fn find_overflow_icon(
             buttons.push(element);
         }
     }
-    // A button whose label names the target app, and only that one, is the
-    // most direct identity: it holds even when Explorer's registry order is
-    // stale or some icons can't be attributed to a process, so positions
-    // don't line up. Only when no single label decides does order count.
+    if let Ok(rect) = Shell_NotifyIconGetRect(&target.identifier) {
+        if let Some(button) = button_at(&buttons, rect, GetDpiForWindow(hwnd).max(96) as f64) {
+            return button.cast().map_err(|e| e.to_string());
+        }
+    }
     let labelled: Vec<_> = buttons
         .iter()
         .filter(|button| {
@@ -571,7 +593,7 @@ unsafe fn find_overflow_icon(
         return button.cast().map_err(|e| e.to_string());
     }
     if buttons.len() != hidden.len() {
-        return Err("Windows could not tell this app's tray icon apart. Open it from the system tray.".into());
+        return Err(LOST.into());
     }
     // Name matches provide cross-checks of Explorer's ordered UI tree, but
     // cannot be required for every icon because tooltip text is app-defined.
@@ -590,11 +612,14 @@ unsafe fn find_overflow_icon(
             .map(|(index, _)| index)
             .collect();
         if matches.len() == 1 && matches[0] != button_index {
-            return Err("Windows tray icon order changed. Please try again.".into());
+            return Err(LOST.into());
         }
     }
     buttons.remove(position).cast().map_err(|e| e.to_string())
 }
+
+/// When no way above could pick the icon out for certain.
+const LOST: &str = "Couldn't find this app's tray icon. Try again in a moment.";
 
 unsafe fn find_promoted_icon(
     automation: &IUIAutomation,
@@ -653,7 +678,7 @@ unsafe fn find_promoted_icon(
     // The icon's position already identifies exactly one button, so it's
     // used even when its app set no tooltip for it.
     if matches.len() != 1 {
-        return Err("Windows could not identify this app's tray icon.".into());
+        return Err(LOST.into());
     }
     matches.remove(0).cast().map_err(|e| e.to_string())
 }

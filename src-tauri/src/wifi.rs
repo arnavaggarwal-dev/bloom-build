@@ -260,7 +260,7 @@ fn profile_xml(name: &str, ssid: &[u8], security: &str, tkip: bool, key: Option<
 }
 
 /// A WPA passphrase is 8-63 characters, or exactly 64 hex digits.
-fn valid_passphrase(key: &str) -> bool {
+pub(crate) fn valid_passphrase(key: &str) -> bool {
     let len = key.chars().count();
     (8..=63).contains(&len) || (len == 64 && key.chars().all(|c| c.is_ascii_hexdigit()))
 }
@@ -459,7 +459,7 @@ pub fn connected_ssid() -> Option<String> {
 
 // ── Commands ─────────────────────────────────────────────────────────────────
 
-fn list_sync() -> Result<WifiNetworkList, String> {
+pub(crate) fn list_sync() -> Result<WifiNetworkList, String> {
     let client = Client::open()?;
     let iface = client.interface()?;
     Ok(match visible_networks(&client, &iface)? {
@@ -485,17 +485,19 @@ pub async fn wifi_list_networks() -> Result<WifiNetworkList, String> {
 /// Starts a fresh scan. Results arrive as a `wifi-changed` event.
 #[tauri::command]
 pub async fn wifi_scan() -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(|| {
-        let client = Client::open()?;
-        let iface = client.interface()?;
-        let rc = unsafe { WlanScan(client.0, &iface, None, None, None) };
-        if rc != 0 {
-            return Err(format!("Couldn't scan for networks ({rc})"));
-        }
-        Ok(())
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(scan_sync)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+pub(crate) fn scan_sync() -> Result<(), String> {
+    let client = Client::open()?;
+    let iface = client.interface()?;
+    let rc = unsafe { WlanScan(client.0, &iface, None, None, None) };
+    if rc != 0 {
+        return Err(format!("Couldn't scan for networks ({rc})"));
+    }
+    Ok(())
 }
 
 fn connect_sync(ssid: &str, password: Option<&str>) -> Result<(), String> {
@@ -630,20 +632,22 @@ pub async fn wifi_disconnect() -> Result<(), String> {
 /// it's the current one.
 #[tauri::command]
 pub async fn wifi_forget(ssid: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let client = Client::open()?;
-        let iface = client.interface()?;
-        let candidate = find_candidate(&client, &iface, &ssid)?;
-        let profile = candidate.profile.ok_or("not-saved")?;
-        let rc =
-            unsafe { WlanDeleteProfile(client.0, &iface, &HSTRING::from(profile.as_str()), None) };
-        if rc != 0 {
-            return Err(format!("Couldn't forget the network ({rc})"));
-        }
-        Ok(())
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || forget_sync(&ssid))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+pub(crate) fn forget_sync(ssid: &str) -> Result<(), String> {
+    let client = Client::open()?;
+    let iface = client.interface()?;
+    let candidate = find_candidate(&client, &iface, ssid)?;
+    let profile = candidate.profile.ok_or("not-saved")?;
+    let rc =
+        unsafe { WlanDeleteProfile(client.0, &iface, &HSTRING::from(profile.as_str()), None) };
+    if rc != 0 {
+        return Err(format!("Couldn't forget the network ({rc})"));
+    }
+    Ok(())
 }
 
 /// Opens the Windows Settings page the Wi-Fi view hands off to: the Wi-Fi

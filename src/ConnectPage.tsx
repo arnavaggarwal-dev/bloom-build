@@ -196,8 +196,13 @@ function WifiList() {
 			})
 			.catch((e) => alive.current && setError(message(e)));
 
+	// Windows' own list shows at once; a scan starts alongside and its result,
+	// like any connect or disconnect, arrives as "wifi-changed". The slow loop
+	// is only a fallback (Linux has no such event).
 	useEffect(() => {
 		alive.current = true;
+		invoke("wifi_rescan").catch(() => {});
+		const changed = listen("wifi-changed", () => void refresh());
 		(async () => {
 			while (alive.current) {
 				await refresh();
@@ -206,6 +211,7 @@ function WifiList() {
 		})();
 		return () => {
 			alive.current = false;
+			changed.then((off) => off());
 		};
 	}, []);
 
@@ -284,19 +290,34 @@ function WifiList() {
 						onClick={() => pick(n)}
 					>
 						{note?.ssid === n.ssid && <div className="cp-note">{note.text}</div>}
-						{n.connected && (
+						{(n.connected || n.saved) && (
 							<div className="cp-actions">
-								<button
-									className="cp-btn"
-									onClick={() =>
-										invoke("wifi_leave")
-											.then(refresh)
-											.catch((e) => setNote({ ssid: n.ssid, text: message(e) }))
-											.finally(() => setOpen(null))
-									}
-								>
-									Disconnect
-								</button>
+								{n.connected && (
+									<button
+										className="cp-btn"
+										onClick={() =>
+											invoke("wifi_leave")
+												.then(refresh)
+												.catch((e) => setNote({ ssid: n.ssid, text: message(e) }))
+												.finally(() => setOpen(null))
+										}
+									>
+										Disconnect
+									</button>
+								)}
+								{n.saved && (
+									<button
+										className="cp-btn"
+										onClick={() =>
+											invoke("wifi_forget_saved", { ssid: n.ssid })
+												.then(refresh)
+												.catch((e) => setNote({ ssid: n.ssid, text: message(e) }))
+												.finally(() => setOpen(null))
+										}
+									>
+										Forget
+									</button>
+								)}
 							</div>
 						)}
 						{asking === n.ssid && busy !== n.ssid && (
