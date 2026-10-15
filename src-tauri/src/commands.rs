@@ -2100,6 +2100,159 @@ pub async fn get_installed_apps() -> Vec<AppInfo> {
     }
 }
 
+/// What's pinned to the real Windows taskbar, as dock items, so the dock can
+/// take in pins made there. Desktop apps come from the shortcuts in
+/// "User Pinned\TaskBar"; Store apps from the package family names inside the
+/// Taskband "Favorites" value, matched to the installed app Bloom already
+/// knows. Read-only: Windows lets no app pin to the taskbar itself.
+#[cfg(windows)]
+#[tauri::command]
+pub async fn get_taskbar_pins() -> Vec<AppInfo> {
+    let installed = get_installed_apps().await;
+    tauri::async_runtime::spawn_blocking(move || taskbar_pins(&installed))
+        .await
+        .unwrap_or_default()
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+pub async fn get_taskbar_pins() -> Vec<AppInfo> {
+    Vec::new()
+}
+
+#[cfg(windows)]
+fn taskbar_pins(installed: &[AppInfo]) -> Vec<AppInfo> {
+    let item = |name: String, path: String| AppInfo {
+        executable: std::path::Path::new(&path)
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned()),
+        name,
+        path,
+        icon: None,
+        is_running: false,
+        hwnd: None,
+        all_hwnds: None,
+    };
+    let mut pins: Vec<AppInfo> = Vec::new();
+    let dir = std::env::var_os("APPDATA").and_then(|a| {
+        std::fs::read_dir(
+            std::path::PathBuf::from(a)
+                .join(r"Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar"),
+        )
+        .ok()
+    });
+    if let Some(entries) = dir {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("lnk"))
+            {
+                continue;
+            }
+            let name = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            // File Explorer's pin is a shell link with no file target.
+            let target = crate::utils::resolve_shortcut(&path.to_string_lossy())
+                .map(|(target, _)| target)
+                .or_else(|| {
+                    (name == "File Explorer").then(|| {
+                        let windir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".into());
+                        format!(r"{windir}\explorer.exe")
+                    })
+                });
+            if let Some(target) = target {
+                pins.push(item(name, target));
+            }
+        }
+    }
+    for family in favorite_families() {
+        if let Some(app) = installed.iter().find(|a| {
+            package_family_from_windows_apps_path(&a.path)
+                .is_some_and(|f| f.eq_ignore_ascii_case(&family))
+        }) {
+            pins.push(app.clone());
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    pins.retain(|a| seen.insert(a.path.to_lowercase()));
+    pins
+}
+
+/// The package family names (`Name_publisherid`) in the taskbar's Favorites.
+#[cfg(windows)]
+fn favorite_families() -> Vec<String> {
+    use windows::core::w;
+    use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_BINARY};
+    let key = w!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\Taskband");
+    let mut size = 0u32;
+    unsafe {
+        if RegGetValueW(HKEY_CURRENT_USER, key, w!("Favorites"), RRF_RT_REG_BINARY, None, None, Some(&mut size)).is_err() {
+            return Vec::new();
+        }
+        let mut data = vec![0u8; size as usize];
+        if RegGetValueW(
+            HKEY_CURRENT_USER,
+            key,
+            w!("Favorites"),
+            RRF_RT_REG_BINARY,
+            None,
+            Some(data.as_mut_ptr() as *mut _),
+            Some(&mut size),
+        )
+        .is_err()
+        {
+            return Vec::new();
+        }
+        data.truncate(size as usize);
+        families_in(&data)
+    }
+}
+
+/// Package family names among the UTF-16 strings of a binary blob: a token of
+/// letters, digits, dots and dashes, then "_" and a 13-character publisher id.
+/// Full package names (with a version and "__") don't qualify.
+#[cfg(any(windows, test))]
+fn families_in(bytes: &[u8]) -> Vec<String> {
+    let mut found = Vec::new();
+    // Strings may start on either byte alignment.
+    for offset in 0..2 {
+        let units: Vec<u16> = bytes[offset.min(bytes.len())..]
+            .chunks_exact(2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]))
+            .collect();
+        let text = String::from_utf16_lossy(&units);
+        for token in text.split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))) {
+            let Some((name, publisher)) = token.rsplit_once('_') else { continue };
+            if token.contains("__")
+                || name.is_empty()
+                || name.contains('_')
+                || publisher.len() != 13
+                || !publisher.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+            {
+                continue;
+            }
+            if !found.iter().any(|f: &String| f.eq_ignore_ascii_case(token)) {
+                found.push(token.to_string());
+            }
+        }
+    }
+    found
+}
+
+#[cfg(test)]
+mod taskbar_pin_tests {
+    #[test]
+    fn finds_store_app_families_in_the_favorites_blob() {
+        let text = "\0TaskBar\0MSTeams_8wekyb3d8bbwe\0MSTeams_24295.605.3225.8804_x64__8wekyb3d8bbwe\0C:\\Program Files\\x.lnk\0";
+        let mut bytes = vec![7u8];
+        bytes.extend(text.encode_utf16().flat_map(|u| u.to_le_bytes()));
+        assert_eq!(super::families_in(&bytes), vec!["MSTeams_8wekyb3d8bbwe".to_string()]);
+    }
+}
+
 #[cfg(windows)]
 #[tauri::command]
 pub fn hide_native_osd() {

@@ -175,6 +175,7 @@ fn main() {
             toggle_touch_keyboard,
             get_app_icon,
             get_installed_apps,
+            get_taskbar_pins,
             save_pinned_apps,
             load_pinned_apps,
             clear_icon_cache,

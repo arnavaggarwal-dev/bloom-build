@@ -68,6 +68,7 @@ Edit `settings.json` with any text editor while Bloom is running. Changes are ap
 | `bloom-ic-hidden-tabs`             | comma list                       | `""`          | Info centre tabs hidden in merged mode (`media`, `calendar`, `timer`, `shelf`; Controls can't be hidden). |
 | `bloom-ic-tab-order`               | comma list                       | `""`          | Info centre tab order in merged mode; tabs it doesn't list keep their default place (Now playing, Calendar, Timer, Shelf, Controls). |
 | `bloom-ic-stretch-ms`             | number (150-900)                 | `"400"`       | Merged mode: how long, in ms, the info panel takes to stretch up out of the dock and back. |
+| `bloom-taskbar-pins-seen`         | `\|`-separated paths            | `""`          | Windows taskbar pins the dock has already taken in; each new taskbar pin is added to the dock once, so unpinning it from the dock sticks. |
 | `bloom-viz-style`                 | `"wave"` \| `"bars"` \| `"blocks"` | `"wave"`      | Audio visualizer style (notch and merged dock), after Kurve: mirrored curve, round bars or stacked blocks. |
 | `bloom-viz-color`                 | `"rainbow"` \| `"smooth"` \| `"mono"` | `"rainbow"` | Audio visualizer colour: drifting rainbow, a gradient around the accent, or the text colour. |
 | `bloom-glass`               | `"true"` / `"false"` | `"true"`  | Frosted glass (native blur) under the dock and notch; off saves power. |

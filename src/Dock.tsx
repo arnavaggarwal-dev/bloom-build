@@ -461,6 +461,36 @@ const Dock = memo(function Dock() {
 			setPinnedApps(pinned.map((a) => ({ ...a, is_pinned: true })));
 			pinned.forEach((app) => fetchIcon(app.path));
 
+			// Apps pinned on the Windows taskbar join the dock, each only the
+			// first time Bloom sees it there, so unpinning one here sticks.
+			void (async () => {
+				const SEEN = "bloom-taskbar-pins-seen";
+				const pins = await invoke<AppInfo[]>("get_taskbar_pins").catch(() => [] as AppInfo[]);
+				if (!pins.length) return;
+				const seen = new Set((getVal(SEEN, "") ?? "").split("|").filter(Boolean));
+				const fresh = pins.filter(
+					(p) => !seen.has(p.path.toLowerCase()) && !pinned.some((a) => isSameApp(a, p))
+				);
+				pins.forEach((p) => seen.add(p.path.toLowerCase()));
+				const value = [...seen].join("|");
+				localStorage.setItem(SEEN, value);
+				invoke("save_setting", { key: SEEN, value }).catch(() => {});
+				if (!fresh.length) return;
+				setPinnedApps((prev) => {
+					const next = [
+						...prev,
+						...fresh
+							.filter((p) => !prev.some((a) => isSameApp(a, p)))
+							.map((a) => ({ ...a, is_pinned: true }))
+					];
+					queueMicrotask(() => {
+						invoke("save_pinned_apps", { apps: next }).catch(console.error);
+					});
+					return next;
+				});
+				fresh.forEach((app) => fetchIcon(app.path));
+			})();
+
 			// Warm the installed-apps cache in the background so the add-app
 			// popup opens with data ready instead of waiting on the scan.
 			invoke<AppInfo[]>("get_installed_apps").catch(() => {});
