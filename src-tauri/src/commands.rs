@@ -529,18 +529,53 @@ pub async fn change_notch_mode(app: AppHandle, mode: String) {
 
 #[cfg(windows)]
 fn get_uwp_launch_cmd(exe_path: &str) -> Option<String> {
-    let family = package_family_from_windows_apps_path(exe_path)?;
-    // The shell lookup below needs COM on this thread.
-    unsafe {
-        let _ = windows::Win32::System::Com::CoInitializeEx(
-            None,
-            windows::Win32::System::Com::COINIT_MULTITHREADED,
-        );
+    // A packaged app can only be started through its AppUserModelID, and the
+    // application part after `!` is whatever the package declares ("Claude",
+    // not always "App"). Look the real one up; guess `!App` only if that fails.
+    if let Some(family) = package_family_from_windows_apps_path(exe_path) {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(
+                None,
+                windows::Win32::System::Com::COINIT_MULTITHREADED,
+            );
+        }
+        if let Some(aumid) = find_aumid_by_family(&family) {
+            return Some(format!("shell:AppsFolder\\{aumid}"));
+        }
     }
-    // The app's real id from the shell: "!App" is only the common suffix, and
-    // a guess is silently not launched (new Teams is "MSTeams_...!MSTeams").
-    let aumid = find_aumid_by_family(&family).unwrap_or_else(|| format!("{family}!App"));
-    Some(format!("shell:AppsFolder\\{}", aumid.trim_start_matches("shell:AppsFolder\\")))
+
+    let path = std::path::Path::new(exe_path);
+    let mut is_windows_apps = false;
+    let mut package_folder = String::new();
+
+    for component in path.components() {
+        if let std::path::Component::Normal(s) = component {
+            let s_str = s.to_string_lossy();
+            if is_windows_apps {
+                package_folder = s_str.to_string();
+                break;
+            }
+            if s_str.eq_ignore_ascii_case("WindowsApps") {
+                is_windows_apps = true;
+            }
+        }
+    }
+
+    if !package_folder.is_empty() {
+        // package_folder format: PackageName_Version_Architecture__PublisherId
+        // We want: PackageName_PublisherId!App
+        if let Some(publisher_idx) = package_folder.rfind("__") {
+            let publisher_id = &package_folder[publisher_idx + 2..];
+            if let Some(first_underscore) = package_folder.find('_') {
+                let package_name = &package_folder[..first_underscore];
+                return Some(format!(
+                    "shell:AppsFolder\\{}_{}!App",
+                    package_name, publisher_id
+                ));
+            }
+        }
+    }
+    None
 }
 
 /// Duplicate-event guard. Kept well below the double-click interval so a
@@ -551,28 +586,35 @@ const START_TOGGLE_DEBOUNCE_MS: i64 = 80;
 #[cfg(windows)]
 const START_WIN_KEY_HOLD_MS: u64 = 40;
 
-/// Presses `vks` in order, holds them for `hold_ms`, then releases them in
-/// reverse: a single key, or a shortcut such as Win+Tab.
 #[cfg(windows)]
-fn send_key_tap(vks: &[windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY], hold_ms: u64) {
+fn send_key_tap(vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY, hold_ms: u64) {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
-        VIRTUAL_KEY,
+        SendInput, INPUT, INPUT_0, KEYBDINPUT, KEYEVENTF_KEYUP,
     };
-    let key = |vk: &VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS| INPUT {
-        r#type: INPUT_KEYBOARD,
+    let down = [INPUT {
+        r#type: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
             ki: KEYBDINPUT {
-                wVk: *vk,
+                wVk: vk,
                 wScan: 0,
-                dwFlags: flags,
+                dwFlags: Default::default(),
                 time: 0,
                 dwExtraInfo: 0,
             },
         },
-    };
-    let down: Vec<INPUT> = vks.iter().map(|vk| key(vk, Default::default())).collect();
-    let up: Vec<INPUT> = vks.iter().rev().map(|vk| key(vk, KEYEVENTF_KEYUP)).collect();
+    }];
+    let up = [INPUT {
+        r#type: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: vk,
+                wScan: 0,
+                dwFlags: KEYEVENTF_KEYUP,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }];
     unsafe {
         SendInput(&down, std::mem::size_of::<INPUT>() as i32);
         if hold_ms > 0 {
@@ -652,9 +694,9 @@ fn toggle_start_menu() {
     tauri::async_runtime::spawn_blocking(move || {
         use windows::Win32::UI::Input::KeyboardAndMouse::{VK_ESCAPE, VK_LWIN};
         if is_start_menu_open() {
-            send_key_tap(&[VK_ESCAPE], 0);
+            send_key_tap(VK_ESCAPE, 0);
         } else if !open_at_press {
-            send_key_tap(&[VK_LWIN], START_WIN_KEY_HOLD_MS);
+            send_key_tap(VK_LWIN, START_WIN_KEY_HOLD_MS);
         }
     });
 }
