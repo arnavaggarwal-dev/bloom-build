@@ -7,11 +7,18 @@ import { initTheme } from "./theme";
 import { useBoolSetting, useSettingsSync } from "./hooks/useSettingsSync";
 import { reloadIfMirrorWasStale } from "./hooks/settingsMirror";
 import { DOCK_SPRING, InfoLeft, InfoPanel, InfoProvider, InfoRight, PANEL_HEIGHT, type InfoTab } from "./InfoCentre";
-import { ChevronUp, Copy, Keyboard } from "lucide-react";
-import { useGlass, useGlassEnabled, useInfoCentre } from "./hooks/useGlass";
+import { ChevronUp, Keyboard } from "lucide-react";
+import { useInfoCentre } from "./hooks/useInfoCentre";
 
-import { mergeTrayApps, selectDockTrayApps, type AppInfo, type TrayApp } from "./dockApps";
-import { removeCustomFolder, type DockExtra } from "./dockExtras";
+import {
+	matchesPackagedExecutable,
+	mergeTrayApps,
+	selectDockTrayApps,
+	type AppInfo,
+	type TrayApp
+} from "./dockApps";
+import { driveLetter, hideDrive, removeCustomFolder, type DockExtra } from "./dockExtras";
+import { createRegionSender, measureElements, padRect, type RegionRect } from "./windowRegion";
 
 // Host processes (Edge/Chrome/Brave/ApplicationFrameHost) run every PWA/UWP
 // window, so their window title must be part of their identity — otherwise two
@@ -37,12 +44,36 @@ export function appIdentity(p: string, executable?: string, name?: string) {
 
 const itemKey = (app: AppInfo) => appIdentity(app.path, app.executable, app.name);
 
+// WinEvent notifications can arrive for windows that do not change the dock.
+// Keep the existing array when its visible content is identical so Framer
+// Motion does not restart dock layout work on every notification.
+function sameRunningApps(left: AppInfo[], right: AppInfo[]): boolean {
+	return (
+		left.length === right.length &&
+		left.every((app, index) => {
+			const next = right[index];
+			return (
+				app.name === next.name &&
+				app.path === next.path &&
+				app.icon === next.icon &&
+				app.is_running === next.is_running &&
+				app.is_background === next.is_background &&
+				app.hwnd === next.hwnd &&
+				app.executable === next.executable &&
+				(app.tray_ids?.join("\0") ?? "") === (next.tray_ids?.join("\0") ?? "") &&
+				JSON.stringify(app.all_hwnds ?? []) === JSON.stringify(next.all_hwnds ?? [])
+			);
+		})
+	);
+}
+
 // Fuzzy identity: a running window and its installed/pinned entry often carry
 // different paths (exe vs .lnk vs AUMID), so exact keys miss and the same app
 // looks pinnable twice. Mirrors the dock list's own pinned↔running matching.
 export function isSameApp(a: AppInfo, b: AppInfo): boolean {
 	if (!a.path || !b.path) return false;
 	if (itemKey(a) === itemKey(b)) return true;
+	if (matchesPackagedExecutable(a, b)) return true;
 	// Browser hosts run many apps under one exe — only the full identity
 	// (which folds in the window/AUMID name) can match those.
 	if (isBrowserHost(a.path) || isBrowserHost(b.path)) return false;
@@ -84,6 +115,16 @@ const isIdentifier = (p: string) => !p.includes("/") && !p.includes("\\");
 
 // Resolve the configured start-button icon to a public asset, or to the data
 // URI of a user-uploaded icon (stored with a "custom:" prefix).
+// Task View's glyph: a window in front of another, as on the taskbar.
+function TaskViewIcon() {
+	return (
+		<svg viewBox="0 0 24 24" fill="none" strokeWidth="1.8" strokeLinecap="round">
+			<rect x="3.5" y="7.5" width="13" height="13" rx="3" />
+			<path d="M8 3.5h9.5a3 3 0 0 1 3 3V16" />
+		</svg>
+	);
+}
+
 function resolveStartIcon(startIcon: string): string {
 	if (startIcon === "bloom-colorful") return "/bloom-colorful.png";
 	if (startIcon === "bloom-golden") return "/bloom-golden.png";
@@ -170,6 +211,9 @@ const Dock = memo(function Dock() {
 	const [dockAdaptive, setDockAdaptive] = useState(
 		() => localStorage.getItem("bloom-dock-adaptive") === "true"
 	);
+	const [dockTaskView, setDockTaskView] = useState(
+		() => localStorage.getItem("bloom-dock-task-view") === "true"
+	);
 	const [startIcon, setStartIcon] = useState(
 		() => localStorage.getItem("bloom-start-icon") || "default"
 	);
@@ -178,7 +222,6 @@ const Dock = memo(function Dock() {
 	);
 	const [dockExtras, setDockExtras] = useState<DockExtra[]>([]);
 	const [startButton] = useBoolSetting("bloom-start-button", true);
-	const [desktopsButton] = useBoolSetting("bloom-desktops-button", true);
 	const [keyboardButton] = useBoolSetting("bloom-touch-keyboard-button", false);
 	// Windows flashing for attention until activated, and taskbar progress/badges.
 	const [flashing, setFlashing] = useState<Set<number>>(() => new Set());
@@ -206,6 +249,7 @@ const Dock = memo(function Dock() {
 	const [isOverlapped, setIsOverlapped] = useState(false);
 	const [isVisible, setIsVisible] = useState(true);
 	const [showAddPopup, setShowAddPopup] = useState(false);
+	const [nativeMenuOpen, setNativeMenuOpen] = useState(false);
 	// Every tray icon, for the ^ popover (merged mode): the dock itself only
 	// shows the few tray apps that have had a window or are pinned.
 	const [trayAll, setTrayAll] = useState<TrayApp[]>([]);
@@ -217,6 +261,7 @@ const Dock = memo(function Dock() {
 		y: number;
 		app: AppInfo | null;
 		extra?: DockExtra | null;
+		taskView?: boolean;
 	} | null>(null);
 	const [activeSubmenu, setActiveSubmenu] = useState<string | null>(null);
 	const [activeOrder, setActiveOrder] = useState<string[]>([]);
@@ -302,7 +347,7 @@ const Dock = memo(function Dock() {
 
 	const isCurrentlyHovered = isDockHovered || isEdgeHovered;
 	const [interactionState, setInteractionState] = useState<"active" | "grace" | "none">("none");
-	const isAnyInteraction = isCurrentlyHovered || !!contextMenu || showAddPopup;
+	const isAnyInteraction = isCurrentlyHovered || !!contextMenu || showAddPopup || nativeMenuOpen;
 
 	const previewTimerRef = useRef<any>(null);
 	const isPreviewHoveredRef = useRef(false);
@@ -445,6 +490,7 @@ const Dock = memo(function Dock() {
 
 			const adaptive = getVal("bloom-dock-adaptive", "false");
 			setDockAdaptive(adaptive === "true");
+			setDockTaskView(getVal("bloom-dock-task-view", "false") === "true");
 
 			const startIconVal = getVal("bloom-start-icon", "default") || "default";
 			setStartIcon(startIconVal);
@@ -552,12 +598,14 @@ const Dock = memo(function Dock() {
 		"bloom-dock-icon-only": setDockIconOnly,
 		"bloom-dock-separator-enabled": setDockSeparatorEnabled,
 		"bloom-dock-adaptive": setDockAdaptive,
+		"bloom-dock-task-view": setDockTaskView,
 		"bloom-start-icon": setStartIcon,
 		"bloom-scale": setScale,
 		"bloom-dock-extras-position": setDockExtrasPosition,
 		"bloom-ic-stretch-ms": (v) => setStretchMs(Number(v) || 400),
 		"bloom-dock-extras-drives": () => setDockExtrasRevision((r) => r + 1),
 		"bloom-dock-extras-recycle-bin": () => setDockExtrasRevision((r) => r + 1),
+		"bloom-dock-extras-hidden-drives": () => setDockExtrasRevision((r) => r + 1),
 		"bloom-dock-extras-folders": () => setDockExtrasRevision((r) => r + 1),
 		"bloom-dock-extras-custom-folders": () => setDockExtrasRevision((r) => r + 1)
 	});
@@ -598,12 +646,6 @@ const Dock = memo(function Dock() {
 		wasMerged.current = infoCentre;
 		setMergePulse(infoCentre ? "in" : "out");
 	}, [infoCentre]);
-	// The glass follows the stretching sheet in merged mode, else the dock.
-	const glass = useGlassEnabled();
-	useGlass(
-		() => [infoCentreRef.current ? dockRef.current?.querySelector(".dock-sheet") : dockRef.current],
-		glass
-	);
 
 	// Window previews float where the panel is: an app hover closes the panel.
 	useEffect(() => {
@@ -645,10 +687,17 @@ const Dock = memo(function Dock() {
 		const poll = async () => {
 			if (isDragging) return;
 			const seq = ++pollSeq;
-			const [windows, tray] = await Promise.all([
-				invoke<AppInfo[]>("get_active_windows"),
-				invoke<TrayApp[]>("get_tray_apps").catch(() => [])
-			]);
+			let windows: AppInfo[];
+			let tray: TrayApp[];
+			try {
+				[windows, tray] = await Promise.all([
+					invoke<AppInfo[]>("get_active_windows"),
+					invoke<TrayApp[]>("get_tray_apps").catch(() => [])
+				]);
+			} catch (error) {
+				console.error("Failed to refresh dock apps:", error);
+				return;
+			}
 			// Ignore responses that arrive out of order: an older poll must never
 			// overwrite a newer state, which would resurrect closed apps.
 			if (stopped || seq !== pollSeq) return;
@@ -666,13 +715,16 @@ const Dock = memo(function Dock() {
 			observedTrayPathsRef.current = selected.observed;
 			setTrayAll(tray);
 			const running = mergeTrayApps(windows, selected.visible);
-			setActiveApps(running);
+			setActiveApps((prev) => (sameRunningApps(prev, running) ? prev : running));
 
 			setActiveOrder((prev) => {
 				const newPaths = running.map((r) => appIdentity(r.path, r.executable, r.name));
 				const existingPaths = prev.filter((p) => newPaths.includes(p));
 				const addedPaths = newPaths.filter((p) => !prev.includes(p));
-				return [...existingPaths, ...addedPaths];
+				const next = [...existingPaths, ...addedPaths];
+				return next.length === prev.length && next.every((path, i) => path === prev[i])
+					? prev
+					: next;
 			});
 
 			running.forEach((app) => fetchIcon(app.path, app.name, app.hwnd));
@@ -863,12 +915,28 @@ const Dock = memo(function Dock() {
 	};
 
 	const openTrayMenu = async (trayId: string) => {
+		setNativeMenuOpen(true);
 		closeMenu();
 		setPreviewData(null);
 		try {
+			// DOCK_RECT can still include the preview's padded hit area until
+			// the next render. Publish the actual bar before placing its menu.
+			const bar = dockRef.current?.getBoundingClientRect();
+			if (bar) {
+				await invoke("update_dock_rect", {
+					rect: {
+						x: Math.round(bar.x),
+						y: Math.round(bar.y),
+						width: Math.round(bar.width),
+						height: Math.round(bar.height)
+					}
+				});
+			}
 			await invoke("show_tray_context_menu", { trayId });
 		} catch (error) {
 			showActionError(error);
+		} finally {
+			setNativeMenuOpen(false);
 		}
 	};
 
@@ -888,6 +956,7 @@ const Dock = memo(function Dock() {
 	// instance, pin, close). Where there is none (Linux), Bloom's menu.
 	const openAppMenu = async (e: React.MouseEvent, app: AppInfo) => {
 		const fallback = { x: e.clientX, y: e.clientY, app };
+		setNativeMenuOpen(true);
 		closeMenu();
 		setPreviewData(null);
 		// The menu takes the button release, which would leave the icon pressed.
@@ -904,17 +973,15 @@ const Dock = memo(function Dock() {
 			else if (action === "close") void closeAppWindows(app);
 		} catch {
 			setContextMenu(fallback);
+		} finally {
+			setNativeMenuOpen(false);
 		}
 	};
 
 	const handleContextMenu = (e: React.MouseEvent, app: AppInfo | null) => {
 		e.stopPropagation();
 		e.preventDefault();
-		// Shift-right-click keeps Bloom pin/customization controls available.
-		if (app?.is_background && app.tray_ids?.length === 1 && !e.shiftKey) {
-			void openTrayMenu(app.tray_ids[0]);
-			return;
-		}
+		// Shift-right-click keeps Bloom's pin/customization menu available.
 		if (app && app.path !== "start" && !app.is_background && !e.shiftKey) {
 			void openAppMenu(e, app);
 			return;
@@ -950,6 +1017,32 @@ const Dock = memo(function Dock() {
 		closeMenu();
 	};
 
+	// Settings > Dock > Drives shows it again.
+	const hideDriveFromDock = (extra: DockExtra) => {
+		const letter = driveLetter(extra);
+		if (!letter) return;
+		const next = hideDrive(localStorage.getItem("bloom-dock-extras-hidden-drives"), letter);
+		localStorage.setItem("bloom-dock-extras-hidden-drives", next);
+		invoke("save_setting", { key: "bloom-dock-extras-hidden-drives", value: next }).catch(
+			showActionError
+		);
+		closeMenu();
+	};
+
+	const openTaskView = () => {
+		invoke("open_system_action", { action: "task-view" }).catch(showActionError);
+	};
+
+	// Like the taskbar's "Hide Task View button"; Settings turns it back on.
+	const hideTaskView = () => {
+		setDockTaskView(false);
+		localStorage.setItem("bloom-dock-task-view", "false");
+		invoke("save_setting", { key: "bloom-dock-task-view", value: "false" }).catch(
+			showActionError
+		);
+		closeMenu();
+	};
+
 	// Measured before paint: the menu's height depends on which items it shows,
 	// so it opens just above the cursor and stays inside the dock window.
 	// Positions are in visual pixels; the menu's CSS zoom scales left/top.
@@ -978,6 +1071,75 @@ const Dock = memo(function Dock() {
 		setShowAddPopup(false);
 		invoke("set_menu_open", { open: false, rect: null }).catch(() => {});
 	};
+
+	// A press outside the dock while a menu or the Add App popup is open. The
+	// click itself goes to whatever is under it (the window region keeps the
+	// dock out of the way), so the backend's mouse hook reports it instead.
+	useEffect(() => {
+		const unlisten = listen("dock-dismiss-menu", () => {
+			setTrayOpen(false);
+			setContextMenu(null);
+			setActiveSubmenu(null);
+			setShowAddPopup(false);
+		});
+		return () => {
+			unlisten.then((f) => f());
+		};
+	}, []);
+
+	// The tallest the expanded bar has been, which sets the region's bottom band.
+	const dockBandHeightRef = useRef(0);
+	const sendDockRegion = useMemo(
+		() =>
+			createRegionSender((rects) => {
+				invoke("set_window_region", { rects }).catch(() => {});
+			}),
+		[]
+	);
+
+	// Clip the dock window to what it draws (see window_region.rs). The bar
+	// gets a full-width band along the bottom, as tall as the expanded bar plus
+	// room for the icons' lift and tooltips above it, so its reveal and width
+	// animations are never clipped; the click-through switching still keeps
+	// the band clear unless the cursor is at the dock. The floating parts are
+	// measured, padded for their shadows. While an icon is dragged the whole
+	// window is included so the dragged icon isn't clipped.
+	useEffect(() => {
+		const bar = dockRef.current?.getBoundingClientRect();
+		if (bar && isExpanded && !isHidden && isVisible) {
+			dockBandHeightRef.current = Math.max(dockBandHeightRef.current, bar.height);
+		}
+		// Merged mode: the sheet stretches up behind the info panel above the bar.
+		const sheet = infoCentre && (infoOpen || panelUp) ? PANEL_HEIGHT * scale : 0;
+		const band = (dockBandHeightRef.current || 72 * scale) + 64 * scale + sheet;
+		const wanted: RegionRect[] = [
+			{ x: 0, y: window.innerHeight - band, width: window.innerWidth, height: band }
+		];
+		if (isDragging) {
+			wanted.push({ x: 0, y: 0, width: window.innerWidth, height: window.innerHeight });
+		}
+		wanted.push(
+			...measureElements([
+				[".preview-tooltip", 40],
+				[".context-menu", 34],
+				[".submenu", 34],
+				[".dock-toast", 20],
+				[".ic-tray-pop", 30]
+			])
+		);
+		// The Add App popup grows from scaleY 0, and that animation doesn't
+		// re-render the dock, so its own box would be measured collapsed. Its
+		// anchor isn't transformed and is exactly as tall as the open popup, so
+		// the height comes from there and the width from the popup itself.
+		const popup = popupRef.current;
+		const anchor = popup?.parentElement;
+		if (popup && anchor) {
+			const p = popup.getBoundingClientRect();
+			const a = anchor.getBoundingClientRect();
+			wanted.push(padRect({ x: p.left, y: a.top, width: p.width, height: a.height }, 40));
+		}
+		sendDockRegion(wanted);
+	});
 
 	useEffect(() => {
 		let open = false;
@@ -1470,13 +1632,49 @@ const Dock = memo(function Dock() {
 										/>,
 										(e) => handleContextMenu(e, startItem)
 									)}
-								{desktopsButton &&
-									renderSystemItem(
-										"task-view",
-										"Task View",
-										() => invoke("open_app", { appName: "task-view" }),
-										<Copy />
-									)}
+								{dockTaskView && (
+									<motion.div
+										key="task-view"
+										initial={{ opacity: 0, scale: 0 }}
+										animate={{ opacity: 1, scale: 1 }}
+										exit={{ opacity: 0, scale: 0, transition: { duration: 0.12 } }}
+										className="dock-icon-wrapper"
+										onContextMenu={(e) => {
+											e.stopPropagation();
+											e.preventDefault();
+											setContextMenu({ x: e.clientX, y: e.clientY, app: null, taskView: true });
+										}}
+										onMouseEnter={() => setHoveredApp("task-view")}
+										onMouseLeave={() => {
+											setHoveredApp(null);
+											setPressedApp(null);
+										}}
+									>
+										{(!dockPreviewEnabled || hoveredApp === "task-view") && (
+											<div className="tooltip">Task View</div>
+										)}
+										<motion.div
+											className="dock-icon"
+											variants={iconVariants}
+											animate={
+												pressedApp === "task-view"
+													? "tap"
+													: hoveredApp === "task-view"
+														? "hover"
+														: "idle"
+											}
+											onPointerDown={() => setPressedApp("task-view")}
+											onPointerUp={() => setPressedApp(null)}
+											onPointerCancel={() => setPressedApp(null)}
+											onClick={(e) => {
+												e.stopPropagation();
+												openTaskView();
+											}}
+										>
+											<TaskViewIcon />
+										</motion.div>
+									</motion.div>
+								)}
 
 								{dockExtrasPosition === "left" && dockExtras.length > 0 && (
 									<>
@@ -1657,7 +1855,7 @@ const Dock = memo(function Dock() {
 
 								{dockSeparatorEnabled &&
 									unpinnedItems.length > 0 &&
-									(pinnedItems.length > 0 || startButton || desktopsButton) && (
+									(pinnedItems.length > 0 || (startItem && startButton) || dockTaskView) && (
 										<div
 											className="dock-app-divider"
 											role="separator"
@@ -1900,7 +2098,9 @@ const Dock = memo(function Dock() {
 					}}
 					onClick={(e) => e.stopPropagation()}
 				>
-					{!contextMenu.extra && (!contextMenu.app || contextMenu.app.path === "start") && (
+					{!contextMenu.extra &&
+						!contextMenu.taskView &&
+						(!contextMenu.app || contextMenu.app.path === "start") && (
 						<div
 							style={{
 								maxHeight: Math.max(64, window.innerHeight / scale - 200),
@@ -1954,6 +2154,17 @@ const Dock = memo(function Dock() {
 									Eject
 								</div>
 							)}
+							{contextMenu.extra.kind === "drive" && (
+								<>
+									<div className="menu-divider" />
+									<div
+										className="menu-item quit"
+										onClick={() => hideDriveFromDock(contextMenu.extra!)}
+									>
+										Remove from Dock
+									</div>
+								</>
+							)}
 							{contextMenu.extra.kind === "custom" && (
 								<>
 									<div className="menu-divider" />
@@ -1965,6 +2176,22 @@ const Dock = memo(function Dock() {
 									</div>
 								</>
 							)}
+						</>
+					) : contextMenu.taskView ? (
+						<>
+							<div
+								className="menu-item"
+								onClick={() => {
+									closeMenu();
+									openTaskView();
+								}}
+							>
+								Open Task View
+							</div>
+							<div className="menu-divider" />
+							<div className="menu-item" onClick={hideTaskView}>
+								Hide Task View
+							</div>
 						</>
 					) : contextMenu.app ? (
 						<>

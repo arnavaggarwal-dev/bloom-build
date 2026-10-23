@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, emit } from "@tauri-apps/api/event";
 import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
@@ -11,6 +11,7 @@ import {
 	addCustomFolder,
 	removeCustomFolder,
 	toggleEnabledFolder,
+	toggleHiddenDrive,
 	DEFAULT_ENABLED_FOLDERS
 } from "../dockExtras";
 import type { WidgetConfig } from "./types";
@@ -25,12 +26,14 @@ function readBool(val: string | null): boolean {
 }
 
 export function useSettings() {
+	const [saveError, setSaveError] = useState(
+		() => sessionStorage.getItem("bloom-settings-save-error") !== null
+	);
+	const saveQueue = useRef<Promise<void>>(Promise.resolve());
+	const saveFailed = useRef(false);
 	const [autostart, setAutostart] = useState(false);
 	const [weatherEnabled, setWeatherEnabled] = useState(true);
 	const [calendarEnabled, setCalendarEnabled] = useState(true);
-	const [glassEnabled, setGlassEnabled] = useState(
-		() => localStorage.getItem("bloom-glass") !== "false"
-	);
 	const [infoCentre, setInfoCentre] = useState(
 		() => localStorage.getItem("bloom-info-centre") === "true"
 	);
@@ -107,8 +110,15 @@ export function useSettings() {
 	const [dockExtrasDrives, setDockExtrasDrives] = useState(
 		() => localStorage.getItem("bloom-dock-extras-drives") !== "false"
 	);
+	const [dockExtrasHiddenDrives, setDockExtrasHiddenDrives] = useState(
+		() => localStorage.getItem("bloom-dock-extras-hidden-drives") || ""
+	);
 	const [dockExtrasRecycleBin, setDockExtrasRecycleBin] = useState(
 		() => localStorage.getItem("bloom-dock-extras-recycle-bin") !== "false"
+	);
+	// Off unless turned on, so existing docks don't change.
+	const [dockTaskView, setDockTaskView] = useState(
+		() => localStorage.getItem("bloom-dock-task-view") === "true"
 	);
 	const [dockExtrasFolders, setDockExtrasFolders] = useState(
 		() => localStorage.getItem("bloom-dock-extras-folders") ?? DEFAULT_ENABLED_FOLDERS
@@ -190,7 +200,6 @@ export function useSettings() {
 			apply(getVal("bloom-weather-enabled"), setWeatherEnabled, readBool);
 			apply(getVal("bloom-calendar-enabled"), setCalendarEnabled, readBool);
 			apply(getVal("bloom-info-centre"), setInfoCentre, readBool);
-			apply(getVal("bloom-glass"), setGlassEnabled, readBool);
 			apply(getVal("bloom-timer-sound-enabled"), setTimerSoundEnabled, readBool);
 			apply(getVal("bloom-music-mode-enabled"), setMusicModeEnabled, readBool);
 			apply(getVal("bloom-notch-remember-panel") ?? getVal("bloom-notch-click-to-open"),
@@ -219,6 +228,8 @@ export function useSettings() {
 			apply(getVal("bloom-dock-extras-position"), setDockExtrasPosition, (v) => v);
 			apply(getVal("bloom-dock-extras-drives"), setDockExtrasDrives, readBool);
 			apply(getVal("bloom-dock-extras-recycle-bin"), setDockExtrasRecycleBin, readBool);
+			apply(getVal("bloom-dock-task-view"), setDockTaskView, readBool);
+			apply(getVal("bloom-dock-extras-hidden-drives"), setDockExtrasHiddenDrives, (v) => v);
 			apply(getVal("bloom-dock-extras-folders"), setDockExtrasFolders, (v) => v);
 			apply(getVal("bloom-dock-extras-custom-folders"), setDockExtrasCustomFolders, (v) => v);
 
@@ -254,6 +265,71 @@ export function useSettings() {
 		}
 	}, []);
 
+	// The file write is authoritative. Serialize controls that change several
+	// settings, and update the local mirror only after the backend confirms the
+	// write. A failed save reloads the page from persisted values and leaves a
+	// visible error instead of keeping an optimistic control value on screen.
+	const saveSetting = (key: string, value: string | null): Promise<boolean> => {
+		const operation = saveQueue.current.then(async () => {
+			if (saveFailed.current) return false;
+			try {
+				await invoke<void>("save_setting", { key, value });
+			} catch (error) {
+				console.error(`Failed to save ${key}:`, error);
+				saveFailed.current = true;
+				sessionStorage.setItem("bloom-settings-save-error", "true");
+				setSaveError(true);
+				window.setTimeout(() => window.location.reload(), 0);
+				return false;
+			}
+			try {
+				if (value === null) localStorage.removeItem(key);
+				else localStorage.setItem(key, value);
+				sessionStorage.removeItem("bloom-settings-save-error");
+			} catch (error) {
+				// The file is saved; a mirror failure must not be reported as a failed write.
+				console.warn("Settings mirror update failed:", error);
+			}
+			setSaveError(false);
+			return true;
+		});
+		saveQueue.current = operation.then(() => {});
+		return operation;
+	};
+
+	// Coordinates only need the backend settings file. Keep them out of the
+	// browser's localStorage mirror while preserving the same queued/error path.
+	const saveLocation = (key: "bloom-weather-lat" | "bloom-weather-lon", value: string | null): Promise<boolean> => {
+		const operation = saveQueue.current.then(async () => {
+			if (saveFailed.current) return false;
+			try {
+				await invoke<void>("save_setting", { key, value });
+			} catch (error) {
+				console.error(`Failed to save ${key}:`, error);
+				saveFailed.current = true;
+				sessionStorage.setItem("bloom-settings-save-error", "true");
+				setSaveError(true);
+				window.setTimeout(() => window.location.reload(), 0);
+				return false;
+			}
+			try {
+				localStorage.removeItem(key);
+				sessionStorage.removeItem("bloom-settings-save-error");
+			} catch (error) {
+				console.warn("Settings mirror cleanup failed:", error);
+			}
+			setSaveError(false);
+			return true;
+		});
+		saveQueue.current = operation.then(() => {});
+		return operation;
+	};
+
+	const dismissSaveError = () => {
+		sessionStorage.removeItem("bloom-settings-save-error");
+		setSaveError(false);
+	};
+
 	// ── Initialize on mount ──
 	useEffect(() => {
 		loadAllSettings();
@@ -285,12 +361,13 @@ export function useSettings() {
 		"bloom-dock-extras-position": setDockExtrasPosition,
 		"bloom-dock-extras-drives": setDockExtrasDrives,
 		"bloom-dock-extras-recycle-bin": setDockExtrasRecycleBin,
+		"bloom-dock-task-view": setDockTaskView,
+		"bloom-dock-extras-hidden-drives": setDockExtrasHiddenDrives,
 		"bloom-dock-extras-folders": setDockExtrasFolders,
 		"bloom-dock-extras-custom-folders": setDockExtrasCustomFolders,
 		"bloom-weather-enabled": setWeatherEnabled,
 		"bloom-calendar-enabled": setCalendarEnabled,
 		"bloom-info-centre": setInfoCentre,
-		"bloom-glass": setGlassEnabled,
 		"bloom-timer-sound-enabled": setTimerSoundEnabled,
 		"bloom-music-mode-enabled": setMusicModeEnabled,
 		"bloom-notch-remember-panel": setNotchRememberPanel,
@@ -453,11 +530,6 @@ export function useSettings() {
 		saveSetting("bloom-calendar-enabled", String(next));
 	};
 
-	const toggleGlass = () => {
-		const next = !glassEnabled;
-		setGlassEnabled(next);
-		saveSetting("bloom-glass", String(next));
-	};
 
 	const toggleInfoCentre = () => {
 		const next = !infoCentre;
@@ -617,10 +689,22 @@ export function useSettings() {
 		saveSetting("bloom-dock-extras-drives", String(next));
 	};
 
+	const toggleDockExtrasDrive = (letter: string) => {
+		const next = toggleHiddenDrive(dockExtrasHiddenDrives, letter);
+		setDockExtrasHiddenDrives(next);
+		saveSetting("bloom-dock-extras-hidden-drives", next);
+	};
+
 	const toggleDockExtrasRecycleBin = () => {
 		const next = !dockExtrasRecycleBin;
 		setDockExtrasRecycleBin(next);
 		saveSetting("bloom-dock-extras-recycle-bin", String(next));
+	};
+
+	const toggleDockTaskView = () => {
+		const next = !dockTaskView;
+		setDockTaskView(next);
+		saveSetting("bloom-dock-task-view", String(next));
 	};
 
 	const toggleDockExtraFolder = (id: string) => {
@@ -754,32 +838,22 @@ export function useSettings() {
 		setCityName(city.name);
 		setShowCityDropdown(false);
 		setCitySearchResults([]);
-		localStorage.setItem("bloom-weather-city", city.name);
-		localStorage.setItem("bloom-weather-lat", city.latitude.toString());
-		localStorage.setItem("bloom-weather-lon", city.longitude.toString());
-		await invoke("save_setting", {
-			key: "bloom-weather-lat",
-			value: city.latitude.toString()
-		}).catch(() => {});
-		await invoke("save_setting", {
-			key: "bloom-weather-lon",
-			value: city.longitude.toString()
-		}).catch(() => {});
-		await invoke("save_setting", { key: "bloom-weather-city", value: city.name }).catch(() => {});
-		emit("weather-refresh", { lat: city.latitude, lon: city.longitude });
+		const saved =
+			(await saveLocation("bloom-weather-lat", city.latitude.toString())) &&
+			(await saveLocation("bloom-weather-lon", city.longitude.toString())) &&
+			(await saveSetting("bloom-weather-city", city.name));
+		if (saved) emit("weather-refresh", { lat: city.latitude, lon: city.longitude });
 	};
 
 	const handleCityClear = async () => {
 		setCityName("");
 		setShowCityDropdown(false);
 		setCitySearchResults([]);
-		localStorage.removeItem("bloom-weather-city");
-		localStorage.removeItem("bloom-weather-lat");
-		localStorage.removeItem("bloom-weather-lon");
-		await invoke("save_setting", { key: "bloom-weather-lat", value: null }).catch(() => {});
-		await invoke("save_setting", { key: "bloom-weather-lon", value: null }).catch(() => {});
-		await invoke("save_setting", { key: "bloom-weather-city", value: null }).catch(() => {});
-		emit("weather-refresh", true);
+		const saved =
+			(await saveLocation("bloom-weather-lat", null)) &&
+			(await saveLocation("bloom-weather-lon", null)) &&
+			(await saveSetting("bloom-weather-city", null));
+		if (saved) emit("weather-refresh", true);
 	};
 
 	// ── Reset to defaults ──
@@ -816,18 +890,13 @@ export function useSettings() {
 	};
 
 	// ── Export / Import ──
+	// The backend opens the native dialog and owns the file path, so these
+	// cannot be used to read or write arbitrary files from a webview.
 	const handleExportSettings = async () => {
 		setExportStatus("exporting");
 		try {
-			const { save: saveDialog } = await import("@tauri-apps/plugin-dialog");
-			const settingsJson = await invoke<string>("export_settings");
-			const filePath = await saveDialog({
-				title: "Export Bloom Settings",
-				defaultPath: "bloom-settings.json",
-				filters: [{ name: "JSON", extensions: ["json"] }]
-			});
+			const filePath = await invoke<string | null>("export_settings_to_file");
 			if (filePath) {
-				await invoke("write_settings_to_path", { path: filePath, content: settingsJson });
 				setExportStatus("success");
 				setTimeout(() => setExportStatus("idle"), 2000);
 			} else {
@@ -843,17 +912,8 @@ export function useSettings() {
 	const handleImportSettings = async () => {
 		setImportStatus("importing");
 		try {
-			const { open: openDialog } = await import("@tauri-apps/plugin-dialog");
-			const filePath = await openDialog({
-				title: "Import Bloom Settings",
-				filters: [{ name: "JSON", extensions: ["json"] }],
-				multiple: false
-			});
+			const filePath = await invoke<string | null>("import_settings_from_file");
 			if (filePath) {
-				const content = await invoke<string>("read_settings_from_path", {
-					path: filePath as string
-				});
-				await invoke("import_settings", { settings: content });
 				await loadAllSettings();
 				setImportStatus("success");
 				setTimeout(() => setImportStatus("idle"), 2000);
@@ -868,6 +928,8 @@ export function useSettings() {
 	};
 
 	return {
+		saveError,
+		dismissSaveError,
 		// System
 		autostart,
 		toggleAutostart,
@@ -905,8 +967,6 @@ export function useSettings() {
 		toggleCalendar,
 		infoCentre,
 		toggleInfoCentre,
-		glassEnabled,
-		toggleGlass,
 		timerSoundEnabled,
 		toggleTimerSound,
 		musicModeEnabled,
@@ -966,8 +1026,12 @@ export function useSettings() {
 		handleDockExtrasPositionChange,
 		dockExtrasDrives,
 		toggleDockExtrasDrives,
+		dockExtrasHiddenDrives,
+		toggleDockExtrasDrive,
 		dockExtrasRecycleBin,
 		toggleDockExtrasRecycleBin,
+		dockTaskView,
+		toggleDockTaskView,
 		dockExtrasFolders,
 		toggleDockExtraFolder,
 		dockExtrasCustomFolders,

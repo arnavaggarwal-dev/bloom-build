@@ -1,4 +1,4 @@
-import { Palette, Droplet, Contrast, Droplets, Sun, Square, Maximize2, Sparkles, LayoutGrid, Copy, Keyboard, Activity } from "lucide-react";
+import { Palette, Droplet, Contrast, Droplets, Sun, Square, Maximize2, LayoutGrid, Keyboard, Activity } from "lucide-react";
 import { useEffect, useState } from "react";
 import { SettingRow } from "./SettingRow";
 import { saveSetting } from "./useSettings";
@@ -32,8 +32,6 @@ interface AppearanceTabProps {
 	handleThemeColorChange: (color: string) => void;
 	themeOpacity: number;
 	handleOpacityChange: (val: number) => void;
-	glassEnabled: boolean;
-	toggleGlass: () => void;
 	themeSaturation: number;
 	handleSaturationChange: (val: number) => void;
 	themeBrightness: number;
@@ -51,8 +49,6 @@ export function AppearanceTab({
 	handleThemeColorChange,
 	themeOpacity,
 	handleOpacityChange,
-	glassEnabled,
-	toggleGlass,
 	themeSaturation,
 	handleSaturationChange,
 	themeBrightness,
@@ -157,17 +153,6 @@ export function AppearanceTab({
 
 			<div className="setting-group-label">Display</div>
 			<div className="setting-group">
-				<SettingRow
-					icon={Sparkles}
-					label="Glass"
-					desc="Frosted, see-through dock and notch. Turn off to save power on slower PCs"
-				>
-					<label className="toggle-switch">
-						<input type="checkbox" checked={glassEnabled} onChange={toggleGlass} />
-						<span className="slider"></span>
-					</label>
-				</SettingRow>
-
 				<SettingRow icon={Square} label="Screen Corners" desc="Rounded top edges">
 					<label className="toggle-switch">
 						<input type="checkbox" checked={cornersEnabled} onChange={toggleCorners} />
@@ -206,7 +191,6 @@ export function AppearanceTab({
 			<div className="setting-group-label">Dock Buttons</div>
 			<div className="setting-group">
 				<DockButtonToggle setting="bloom-start-button" fallback icon={LayoutGrid} label="Start button" desc="Opens the Start menu" />
-				<DockButtonToggle setting="bloom-desktops-button" fallback icon={Copy} label="Desktops button" desc="Opens Task View, right of Start" />
 				<DockButtonToggle
 					setting="bloom-touch-keyboard-button"
 					fallback={false}

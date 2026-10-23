@@ -98,6 +98,14 @@ function SettingsApp() {
 				</div>
 
 				<div className="settings-content">
+					{settings.saveError && (
+						<div className="settings-save-error" role="alert">
+							<span>Changes could not be saved. Your saved settings have been restored.</span>
+							<button onClick={settings.dismissSaveError} aria-label="Dismiss save error">
+								<X size={14} strokeWidth={2} />
+							</button>
+						</div>
+					)}
 					{announcement && !dismissed && (
 						<div className={`announcement-banner severity-${announcement.severity}`}>
 							<Megaphone size={14} className="announcement-banner-icon" />
@@ -143,8 +151,6 @@ function SettingsApp() {
 							handleThemeColorChange={settings.handleThemeColorChange}
 							themeOpacity={settings.themeOpacity}
 							handleOpacityChange={settings.handleOpacityChange}
-							glassEnabled={settings.glassEnabled}
-							toggleGlass={settings.toggleGlass}
 							themeSaturation={settings.themeSaturation}
 							handleSaturationChange={settings.handleSaturationChange}
 							themeBrightness={settings.themeBrightness}
@@ -220,8 +226,12 @@ function SettingsApp() {
 							handleDockExtrasPositionChange={settings.handleDockExtrasPositionChange}
 							dockExtrasDrives={settings.dockExtrasDrives}
 							toggleDockExtrasDrives={settings.toggleDockExtrasDrives}
+							dockExtrasHiddenDrives={settings.dockExtrasHiddenDrives}
+							toggleDockExtrasDrive={settings.toggleDockExtrasDrive}
 							dockExtrasRecycleBin={settings.dockExtrasRecycleBin}
 							toggleDockExtrasRecycleBin={settings.toggleDockExtrasRecycleBin}
+							dockTaskView={settings.dockTaskView}
+							toggleDockTaskView={settings.toggleDockTaskView}
 							dockExtrasFolders={settings.dockExtrasFolders}
 							toggleDockExtraFolder={settings.toggleDockExtraFolder}
 							dockExtrasCustomFolders={settings.dockExtrasCustomFolders}

@@ -2,7 +2,7 @@ use crate::types::{AppInfo, IntRect, SystemCommand};
 use std::collections::HashMap;
 use std::sync::mpsc::Sender;
 use std::sync::{
-    atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32},
+    atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicIsize, AtomicU32},
     Mutex, OnceLock,
 };
 #[cfg(windows)]
@@ -31,6 +31,9 @@ pub static NOTCH_IS_HOVERED: AtomicBool = AtomicBool::new(false);
 /// smart/peek mode the notch must stay click-through even over its footprint.
 pub static NOTCH_IS_VISIBLE: AtomicBool = AtomicBool::new(true);
 pub static MENU_IS_OPEN: AtomicBool = AtomicBool::new(false);
+// The dock window's handle, for the mouse hook to tell whether a press lands
+// on the dock (which closes its own menus) or outside it.
+pub static DOCK_HWND: AtomicIsize = AtomicIsize::new(0);
 pub static MENU_RECT: Mutex<Option<IntRect>> = Mutex::new(None);
 pub static ICON_CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
 
@@ -43,10 +46,10 @@ pub static CURRENT_VOLUME: AtomicU32 = AtomicU32::new(50);
 pub static LAST_BRIGHTNESS_CHANGE: AtomicI64 = AtomicI64::new(0);
 pub static ANY_MEDIA_PLAYING: AtomicBool = AtomicBool::new(false);
 pub static LAST_START_TOGGLE_MS: AtomicI64 = AtomicI64::new(0);
+// Whether the Start menu was open when the left button last went down,
+// recorded by the mouse hook before Start can react to the press.
+pub static START_OPEN_AT_PRESS: AtomicBool = AtomicBool::new(false);
 pub static OVERLAY_IN_SPLASH: AtomicBool = AtomicBool::new(false);
-/// A volume or brightness HUD card is up in the overlay. Only then are its
-/// edge rects hit-testable; the rest of the time the overlay stays click-through.
-pub static OVERLAY_HUD_UP: AtomicBool = AtomicBool::new(false);
 pub static CURRENT_FOREGROUND_FULLSCREEN: AtomicBool = AtomicBool::new(false);
 pub static CURRENT_FOREGROUND_MAXIMIZED: AtomicBool = AtomicBool::new(false);
 
@@ -102,3 +105,6 @@ pub static PROCESS_NAME_CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLo
 pub static THUMBNAIL_CACHE: OnceLock<Mutex<HashMap<isize, (String, i64)>>> = OnceLock::new();
 pub static FOCUS_TIMESTAMPS: OnceLock<Mutex<HashMap<isize, i64>>> = OnceLock::new();
 pub static SETTINGS_CACHE: OnceLock<Mutex<HashMap<String, serde_json::Value>>> = OnceLock::new();
+/// Serialize read/modify/write settings commands from all four webviews.
+pub static SETTINGS_FILE_LOCK: Mutex<()> = Mutex::new(());
+pub static PINNED_FILE_LOCK: Mutex<()> = Mutex::new(());

@@ -85,9 +85,39 @@ pub fn place_window(window: &WebviewWindow, x: i32, y: i32, width: i32, height: 
 /// activation side effects to undo, so there is nothing to re-assert.
 pub fn re_assert_topmost(_hwnd: HWND) {}
 
+/// Set from `mark_dock_windows`, for the calls that only get a window id.
+static APP: OnceLock<AppHandle> = OnceLock::new();
+
+/// `set_click_through` stand-in: tauri's ignore-cursor flag on the Bloom
+/// window with this X11 id. Applied only when it changes, since each call
+/// reshapes the GTK input region and the hit-testing calls it on every move.
+pub fn set_click_through(hwnd: HWND, ignore: bool) -> bool {
+    static STATE: Mutex<Option<HashMap<Window, bool>>> = Mutex::new(None);
+    let win = hwnd.0 as usize as Window;
+    if win == 0 {
+        return false;
+    }
+    let mut guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let states = guard.get_or_insert_with(HashMap::new);
+    if states.get(&win) == Some(&ignore) {
+        return false;
+    }
+    let Some(window) = APP
+        .get()
+        .and_then(|app| app.webview_windows().into_values().find(|w| xid(w) == win))
+    else {
+        return false;
+    };
+    let _ = window.set_ignore_cursor_events(ignore);
+    states.insert(win, ignore);
+    true
+}
+
 /// ponytail: desktop panels (GNOME Shell, Plasma, XFCE) have no common hide
 /// API, so the native panel stays; Bloom's dock reserves its own strip.
-pub fn set_taskbar_visibility(_visible: bool, _always_on_top: bool) {}
+pub fn set_taskbar_visibility(_visible: bool, _always_on_top: bool) -> bool {
+    true
+}
 
 /// The panel is never hidden (see `set_taskbar_visibility`), so a crash leaves
 /// nothing to restore.
@@ -98,6 +128,7 @@ pub fn restore_taskbar_after_crash() {}
 /// stop it treating the screen-sized overlay as a fullscreen app.
 pub fn mark_dock_windows(app: &AppHandle) {
     use gtk::prelude::GtkWindowExt;
+    let _ = APP.set(app.clone());
     for label in ["main", "dock", "overlay"] {
         if let Some(window) = app.get_webview_window(label).and_then(|w| w.gtk_window().ok()) {
             window.set_type_hint(gtk::gdk::WindowTypeHint::Dock);

@@ -1,11 +1,18 @@
 import { Visualizer } from "./Visualizer";
 import { motion, AnimatePresence, useAnimation } from "framer-motion";
-import { useEffect, useLayoutEffect, useState, useCallback, useRef, memo } from "react";
+import { useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef, memo } from "react";
 import { emit, listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { getVersion } from "@tauri-apps/api/app";
 import type { UpdateCheckResult } from "./updater";
+import { batteryTooltip, type BatteryDetails } from "./batteryTooltip";
+import {
+	createRegionSender,
+	measureElements,
+	notchPillBox,
+	type RegionRect
+} from "./windowRegion";
 import "./App.css";
 import { initTheme } from "./theme";
 import {
@@ -25,7 +32,7 @@ import { useSettingsSync } from "./hooks/useSettingsSync";
 import { useTrailingThrottle } from "./hooks/useTrailingThrottle";
 import { useSliderSync, useTransientError } from "./hooks/useSliderSync";
 import { useAnnouncement } from "./hooks/useAnnouncement";
-import { useGlass, useGlassEnabled, useInfoCentre } from "./hooks/useGlass";
+import { useInfoCentre } from "./hooks/useInfoCentre";
 import { reloadIfMirrorWasStale } from "./hooks/settingsMirror";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
@@ -404,6 +411,19 @@ function App() {
 
 	const [batteryLevel, setBatteryLevel] = useState(100);
 	const [isCharging, setIsCharging] = useState(false);
+	// Fetched when the pointer reaches the battery widget, for its tooltip.
+	const [batteryDetails, setBatteryDetails] = useState<BatteryDetails | null>(null);
+	const [batterySaverEnabled, setBatterySaverEnabled] = useState(false);
+	// The status widget whose tooltip is open, the side of the pill it hangs
+	// from, and the distance from the widget to just past that edge.
+	const [statusTooltip, setStatusTooltip] = useState<{
+		id: string;
+		side: "below" | "left" | "right";
+		offset: number;
+	} | null>(null);
+	const statusTooltipTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	// Width the hovered status strip needs so neither side runs into the clock.
+	const [statusFitWidth, setStatusFitWidth] = useState(0);
 	const [showPowerPulse, setShowPowerPulse] = useState(false);
 	const [showLowBatteryPulse, setShowLowBatteryPulse] = useState(false);
 	const [lowBatteryThreshold, setLowBatteryThreshold] = useState(() =>
@@ -580,12 +600,49 @@ function App() {
 	const [isOverlapped, setIsOverlapped] = useState(false);
 	const [interactionState, setInteractionState] = useState<"active" | "grace" | "none">("none");
 	const bloomRef = useRef<HTMLDivElement>(null);
+	// Measured to fit the hovered status strip; see statusFitWidth.
+	const leftWidgetsRef = useRef<HTMLDivElement>(null);
+	const rightWidgetsRef = useRef<HTMLDivElement>(null);
+	const timeCenterRef = useRef<HTMLDivElement>(null);
 	const musicBubbleRef = useRef<HTMLButtonElement>(null);
 	const shelfBubbleRef = useRef<HTMLButtonElement>(null);
 	const reportNotchRect = useRef<() => void>(() => {});
-	const dockEnabledInitial = useRef(true);
-	const dockModeInitial = useRef(true);
-	const notchModeInitial = useRef(true);
+	// The pill's target box in window CSS px, and the sender that applies the
+	// notch window's region (holding earlier regions while it shrinks).
+	const pillTargetRef = useRef<RegionRect | null>(null);
+	const sendNotchRegion = useMemo(
+		() =>
+			createRegionSender((rects) => {
+				invoke("set_window_region", { rects }).catch(() => {});
+			}),
+		[]
+	);
+
+	// Recomputes the notch window's region from the pill's target box and the
+	// floating parts drawn around it, and sends it if it changed. Reads only
+	// refs and the DOM, so it is safe to call from any callback.
+	const updateNotchRegion = () => {
+		const wanted: RegionRect[] = [];
+		if (pillTargetRef.current) wanted.push(pillTargetRef.current);
+		// Each floating part, padded to cover what it paints outside its box: a
+		// tooltip card's shadow reaches 20px out plus a 6px drop, a bubble's
+		// glow less, and the screen corners nothing.
+		wanted.push(
+			...measureElements([
+				[".activity-bubble", 16],
+				[".status-tooltip", 28],
+				[".screen-corner", 0]
+			])
+		);
+		sendNotchRegion(wanted);
+	};
+	const [systemSettingsReady, setSystemSettingsReady] = useState(false);
+	const [waitForStartupSplash, setWaitForStartupSplash] = useState(false);
+	const initialSystemSyncDone = useRef(false);
+	const splashDone = useRef(false);
+	const systemSyncQueue = useRef<Promise<void>>(Promise.resolve());
+	const appliedDock = useRef<{ enabled: boolean; mode: string } | null>(null);
+	const appliedNotchMode = useRef<string | null>(null);
 
 	const isAnyInteraction = isHovered || isNotchHovered || isEdgeHovered;
 	const isHidden =
@@ -608,12 +665,6 @@ function App() {
 	const [infoCentre, setInfoCentre] = useInfoCentre();
 	const infoCentreRef = useRef(infoCentre);
 	infoCentreRef.current = infoCentre;
-	// The notch draws nothing while merged into the dock: no glass for it then.
-	const glass = useGlassEnabled();
-	useGlass(
-		() => (windowLabel === "main" && !infoCentreRef.current ? [bloomRef.current] : []),
-		glass
-	);
 
 	useEffect(() => {
 		if (windowLabel === "main") {
@@ -653,6 +704,8 @@ function App() {
 						height: Math.round(bottom - top)
 					}
 				}).catch(() => {});
+				// Bubbles finishing their entrance land here too.
+				updateNotchRegion();
 			}
 		};
 		reportNotchRect.current = updateRect;
@@ -829,10 +882,12 @@ function App() {
 
 	useEffect(() => {
 		if (!windowLabel) return;
+		let cancelled = false;
 
 		invoke("load_settings")
 			.then(async (settings: any) => {
 				if (await reloadIfMirrorWasStale(settings)) return;
+				if (cancelled) return;
 				const getVal = (key: string, fallback: string | null = null) => {
 					const val = settings[key];
 					if (val !== undefined && val !== null) return String(val);
@@ -885,63 +940,20 @@ function App() {
 					}
 					const rawDockMode = getVal("bloom-dock-mode", "smart") as string;
 					const dockMode = rawDockMode === "auto-hide" ? "smart" : rawDockMode;
-					const syncWindows = async () => {
-						const dockEnabled = getVal("bloom-dock-enabled", "true") === "true";
-						if (dockEnabled) {
-							await invoke("init_dock", { mode: dockMode });
-						} else {
-							await invoke("toggle_dock", { enable: false });
-						}
-						await invoke("change_notch_mode", { mode: nMode });
-						await invoke("sync_appbar");
-					};
-
-					const dockEnabled = getVal("bloom-dock-enabled", "true") === "true";
-					const runDockInit = () => {
-						// 1. Snappy initial sync
-						setTimeout(syncWindows, 400);
-						// 2. Safety-net dock retry
-						if (dockEnabled) {
-							setTimeout(() => invoke("init_dock", { mode: dockMode }).catch(() => {}), 1500);
-						}
-						// 3. Layout corrections
-						setTimeout(() => invoke("sync_appbar"), 1000);
-						setTimeout(() => invoke("sync_appbar"), 2500);
-						setTimeout(() => invoke("sync_appbar"), 5000);
-					};
-
-					// Mirror Overlay.tsx's splash decision for dock init too — only wait when
-					// a splash is actually coming, otherwise init immediately.
-					const runDockInitAfterSplash = () => {
-						let dockStarted = false;
-						const unlistenDock = listen("splash-done", () => {
-							if (dockStarted) return;
-							dockStarted = true;
-							runDockInit();
-							unlistenDock.then((fn) => fn());
-						});
-						setTimeout(() => {
-							if (dockStarted) return;
-							dockStarted = true;
-							runDockInit();
-							unlistenDock.then((fn) => fn());
-						}, 6000);
-					};
-
+					setDockMode(dockMode);
+					setDockEnabled(getVal("bloom-dock-enabled", "true") === "true");
 					const storedVersion = localStorage.getItem("bloom-app-version");
-					if (firstRun || storedVersion === null) {
-						runDockInitAfterSplash();
-					} else {
-						getVersion()
-							.then((currentVersion) => {
-								if (storedVersion !== currentVersion) {
-									runDockInitAfterSplash();
-								} else {
-									runDockInit();
-								}
-							})
-							.catch(() => runDockInit());
+					let waitForSplash = firstRun || storedVersion === null;
+					if (!waitForSplash) {
+						try {
+							waitForSplash = storedVersion !== (await getVersion());
+						} catch {
+							// Version lookup is optional; continue startup without a splash.
+						}
 					}
+					if (cancelled) return;
+					setWaitForStartupSplash(waitForSplash);
+					setSystemSettingsReady(true);
 				}
 
 				const scaleVal = getVal("bloom-scale");
@@ -957,7 +969,13 @@ function App() {
 					} catch {}
 				}
 			})
-			.catch(console.error);
+			.catch((error) => {
+				console.error(error);
+				if (!cancelled && windowLabel === "main") setSystemSettingsReady(true);
+			});
+		return () => {
+			cancelled = true;
+		};
 	}, [windowLabel]); // eslint-disable-line react-hooks/exhaustive-deps
 
 	useEffect(() => {
@@ -1032,47 +1050,97 @@ function App() {
 		[windowLabel]
 	);
 
-	// Side effects: dock-enabled (skip first render — startup code handles initial state)
+	// One owner applies the latest window settings. Superseded splash timers and
+	// retries are cancelled; an in-flight command finishes before the new state
+	// is applied, so an old startup retry cannot overwrite a user change.
 	useEffect(() => {
-		if (windowLabel !== "main") return;
-		if (dockEnabledInitial.current) {
-			dockEnabledInitial.current = false;
-			return;
-		}
-		if (dockEnabled) {
-			invoke("init_dock", { mode: localStorage.getItem("bloom-dock-mode") || "smart" });
+		if (windowLabel !== "main" || !systemSettingsReady) return;
+
+		let cancelled = false;
+		let started = false;
+		let attempts = 0;
+		let startTimer: number | undefined;
+		let splashTimer: number | undefined;
+		let retryTimer: number | undefined;
+		let settleTimer: number | undefined;
+		let unlistenSplash: (() => void) | undefined;
+
+		const reconcile = () => {
+			systemSyncQueue.current = systemSyncQueue.current
+				.catch(() => {})
+				.then(async () => {
+					if (cancelled) return;
+					try {
+						if (dockEnabled) {
+							if (!appliedDock.current?.enabled) {
+								await invoke("init_dock", { mode: dockMode });
+								appliedDock.current = { enabled: true, mode: dockMode };
+							} else if (appliedDock.current.mode !== dockMode) {
+								await invoke("change_dock_mode", { mode: dockMode });
+								appliedDock.current = { enabled: true, mode: dockMode };
+							}
+						} else if (appliedDock.current?.enabled !== false) {
+							await invoke("toggle_dock", { enable: false });
+							appliedDock.current = { enabled: false, mode: dockMode };
+						}
+						if (cancelled) return;
+						if (appliedNotchMode.current !== notchMode) {
+							await invoke("change_notch_mode", { mode: notchMode });
+							appliedNotchMode.current = notchMode;
+						}
+						if (cancelled) return;
+						await invoke("sync_appbar");
+						if (cancelled) return;
+						const wasInitialSync = !initialSystemSyncDone.current;
+						initialSystemSyncDone.current = true;
+						if (wasInitialSync) {
+							settleTimer = window.setTimeout(() => {
+								if (!cancelled) {
+									systemSyncQueue.current = systemSyncQueue.current
+										.catch(() => {})
+										.then(() => invoke<void>("sync_appbar"))
+										.catch((error) => console.error("AppBar settle failed", error));
+								}
+							}, 1000);
+						}
+					} catch (error) {
+						console.error("Window reconciliation failed", error);
+						if (!cancelled && attempts++ < 1) {
+							retryTimer = window.setTimeout(reconcile, 1000);
+						}
+					}
+				});
+		};
+
+		const start = () => {
+			if (cancelled || started) return;
+			started = true;
+			splashDone.current = true;
+			if (splashTimer !== undefined) window.clearTimeout(splashTimer);
+			unlistenSplash?.();
+			startTimer = window.setTimeout(reconcile, initialSystemSyncDone.current ? 0 : 400);
+		};
+
+		if (waitForStartupSplash && !splashDone.current && !initialSystemSyncDone.current) {
+			void listen("splash-done", start)
+				.then((unlisten) => {
+					if (cancelled || started) unlisten();
+					else unlistenSplash = unlisten;
+				})
+				.catch(() => start());
+			splashTimer = window.setTimeout(start, 6000);
 		} else {
-			invoke("toggle_dock", { enable: false });
+			start();
 		}
-		setTimeout(() => invoke("sync_appbar"), 200);
-	}, [dockEnabled, windowLabel]);
 
-	// Side effects: dock-mode (skip first render)
-	useEffect(() => {
-		if (windowLabel !== "main") return;
-		if (dockModeInitial.current) {
-			dockModeInitial.current = false;
-			return;
-		}
-		invoke("change_dock_mode", { mode: dockMode });
-		setTimeout(() => invoke("sync_appbar"), 200);
-	}, [dockMode, windowLabel]);
-
-	// Merging into the dock (or back) frees or restores the notch's reserved
-	// band at the top; the backend decides from the saved setting.
-	useEffect(() => {
-		if (windowLabel === "main") invoke("sync_appbar").catch(() => {});
-	}, [infoCentre, windowLabel]);
-
-	// Side effects: notch-mode (skip first render)
-	useEffect(() => {
-		if (windowLabel !== "main") return;
-		if (notchModeInitial.current) {
-			notchModeInitial.current = false;
-			return;
-		}
-		invoke("change_notch_mode", { mode: notchMode });
-	}, [notchMode, windowLabel]);
+		return () => {
+			cancelled = true;
+			for (const timer of [startTimer, splashTimer, retryTimer, settleTimer]) {
+				if (timer !== undefined) window.clearTimeout(timer);
+			}
+			unlistenSplash?.();
+		};
+	}, [windowLabel, systemSettingsReady, waitForStartupSplash, dockEnabled, dockMode, notchMode, infoCentre]);
 
 	// Bloom mode state: 'music', 'calendar', 'command-center', 'announcement', 'shelf' or 'status'
 	const [bloomMode, setBloomMode] = useState<BloomMode>("status");
@@ -2278,6 +2346,82 @@ function App() {
 		}
 	}, [bluetoothEnabled]);
 
+	// The notch never takes focus, and native `title` tooltips only show for an
+	// active window, so the status widgets draw their own. A tooltip opens
+	// after a tooltip-like delay, by which time the battery details fetched on
+	// enter are in. Under the status strip it hangs below the pill; once the
+	// notch is open the pill is the tall panel, so it sits beside the pill on
+	// the widget's side instead, level with the widget.
+	const showStatusTooltip = useCallback(
+		(id: string, widget: HTMLElement) => {
+			if (statusTooltipTimerRef.current) clearTimeout(statusTooltipTimerRef.current);
+			statusTooltipTimerRef.current = setTimeout(() => {
+				const pill = bloomRef.current?.getBoundingClientRect();
+				const own = widget.getBoundingClientRect();
+				// Client rects are zoomed by the notch scale; offsets are not.
+				if (!pill) {
+					setStatusTooltip({ id, side: "below", offset: 8 });
+				} else if (!isOpen) {
+					const gap = (pill.bottom - own.bottom) / scale;
+					setStatusTooltip({ id, side: "below", offset: Math.max(0, gap) + 8 });
+				} else if (own.left + own.width / 2 >= pill.left + pill.width / 2) {
+					const gap = (pill.right - own.right) / scale;
+					setStatusTooltip({ id, side: "right", offset: Math.max(0, gap) + 10 });
+				} else {
+					const gap = (own.left - pill.left) / scale;
+					setStatusTooltip({ id, side: "left", offset: Math.max(0, gap) + 10 });
+				}
+			}, 400);
+		},
+		[scale, isOpen]
+	);
+
+	const hideStatusTooltip = useCallback(() => {
+		if (statusTooltipTimerRef.current) clearTimeout(statusTooltipTimerRef.current);
+		statusTooltipTimerRef.current = null;
+		setStatusTooltip(null);
+	}, []);
+
+	// Widgets unmount when the notch collapses, without a mouse leave, and an
+	// open card is placed for the notch's shape when it opened.
+	useEffect(() => {
+		hideStatusTooltip();
+	}, [isHovered, isOpen, hideStatusTooltip]);
+
+	// Both sides of the status strip get equal width around the centered
+	// clock, so the notch must fit the clock plus twice the wider side. Widget
+	// widths vary (network speed especially), so they are measured rather than
+	// counted. The width only grows during a hover, so a live label getting
+	// shorter doesn't make the notch jitter. Layout widths are unaffected by
+	// the notch scale.
+	useLayoutEffect(() => {
+		if (!isHovered || bloomMode !== "status") {
+			if (statusFitWidth !== 0) setStatusFitWidth(0);
+			return;
+		}
+		// offsetWidth, not scrollWidth: an open tooltip card overflows its
+		// widget and must not widen the notch.
+		const side = Math.max(
+			leftWidgetsRef.current?.offsetWidth ?? 0,
+			rightWidgetsRef.current?.offsetWidth ?? 0
+		);
+		const clock = timeCenterRef.current?.offsetWidth ?? 0;
+		// The pill's 12px padding on each side, and a 10px gap to the clock.
+		const needed = Math.ceil(clock + 2 * (side + 10) + 24);
+		if (side > 0 && needed > statusFitWidth) setStatusFitWidth(needed);
+	});
+
+	const refreshBatteryDetails = useCallback(() => {
+		invoke<BatteryDetails>("get_battery_details")
+			.then(setBatteryDetails)
+			.catch((err) => console.error("Failed to read battery details:", err));
+		// Read on hover for the tooltip; the power mode button replaced the
+		// Energy Saver button that used to poll it.
+		invoke<boolean>("get_battery_saver_state")
+			.then(setBatterySaverEnabled)
+			.catch(() => {});
+	}, []);
+
 	// Brightness change with throttling
 	const sendBrightness = useTrailingThrottle((newVal: number) => {
 		invoke("set_brightness", { brightness: newVal }).catch(() => {});
@@ -2370,63 +2514,133 @@ function App() {
 		}
 	};
 
+	// Where a status tooltip card sits and how it slides in, by placement.
+	const statusTooltipMotion = (side: "below" | "left" | "right", offset: number) => {
+		if (side === "below") {
+			return {
+				style: { top: `calc(100% + ${offset}px)`, left: "50%" },
+				hidden: { opacity: 0, x: "-50%", y: -4 },
+				shown: { opacity: 1, x: "-50%", y: 0 }
+			};
+		}
+		// Top-aligned with the widget rather than centered on it: the widgets
+		// sit near the top of the screen, which would cut a centered card off.
+		const nudge = side === "right" ? -4 : 4;
+		return {
+			style: { top: -8, [side === "right" ? "left" : "right"]: `calc(100% + ${offset}px)` },
+			hidden: { opacity: 0, x: nudge, y: 0 },
+			shown: { opacity: 1, x: 0, y: 0 }
+		};
+	};
+
+	// A status widget with its tooltip card, which hangs outside the pill.
+	const statusWidget = (
+		id: string,
+		tooltip: string,
+		content: React.ReactNode,
+		onEnter?: () => void
+	) => (
+		<div
+			className="passive-feature"
+			key={id}
+			onMouseEnter={(e) => {
+				onEnter?.();
+				showStatusTooltip(id, e.currentTarget);
+			}}
+			onMouseLeave={hideStatusTooltip}
+		>
+			{content}
+			<AnimatePresence>
+				{statusTooltip?.id === id &&
+					(() => {
+						const placed = statusTooltipMotion(statusTooltip.side, statusTooltip.offset);
+						return (
+							<motion.div
+								className="status-tooltip"
+								style={placed.style}
+								initial={placed.hidden}
+								animate={placed.shown}
+								exit={placed.hidden}
+								transition={{ duration: 0.15 }}
+							>
+								{tooltip}
+							</motion.div>
+						);
+					})()}
+			</AnimatePresence>
+		</div>
+	);
+
 	// Render a status widget by ID
 	const renderStatusWidget = (id: string) => {
 		switch (id) {
 			case "weather":
 				if (!settingsWeatherEnabled || temperature === null) return null;
-				return (
-					<div
-						className="passive-feature"
-						key="weather"
-						title={cityName ? `${weatherCondition} · ${cityName}` : weatherCondition}
-					>
+				return statusWidget(
+					"weather",
+					cityName ? `${weatherCondition} · ${cityName}` : weatherCondition,
+					<>
 						<WeatherIcon size={12} strokeWidth={2.2} />
 						<span className="label">
 							{temperature}°{tempUnit === "fahrenheit" ? "F" : "C"}
 						</span>
-					</div>
+					</>
 				);
 			case "battery":
-				return (
-					<div className="passive-feature" key="battery">
+				return statusWidget(
+					"battery",
+					batteryTooltip(
+						batteryDetails,
+						{ level: batteryLevel, charging: isCharging },
+						batterySaverEnabled
+					),
+					<>
 						<BatteryIcon
 							charging={isCharging}
 							level={batteryLevel}
 							threshold={lowBatteryThreshold}
 						/>
 						<span className="label">{batteryLevel}%</span>
-					</div>
+					</>,
+					refreshBatteryDetails
 				);
 			case "cpu":
-				return (
-					<div className="passive-feature" key="cpu" title="CPU Usage">
+				return statusWidget(
+					"cpu",
+					"CPU Usage",
+					<>
 						<Cpu size={12} strokeWidth={2} />
 						<span className="label">{cpuUsage}%</span>
-					</div>
+					</>
 				);
 			case "ram":
-				return (
-					<div className="passive-feature" key="ram" title="RAM Usage">
+				return statusWidget(
+					"ram",
+					"RAM Usage",
+					<>
 						<MemoryStick size={12} strokeWidth={2} />
 						<span className="label">{Math.round(ramUsage)}%</span>
-					</div>
+					</>
 				);
 			case "disk":
-				return (
-					<div className="passive-feature" key="disk" title="Free Disk Space">
+				return statusWidget(
+					"disk",
+					"Free Disk Space",
+					<>
 						<HardDrive size={12} strokeWidth={2} />
 						<span className="label">{diskSpace}GB</span>
-					</div>
+					</>
 				);
 			case "net":
-				return (
-					<div className="passive-feature" key="net" title="Network Speed">
+				return statusWidget(
+					"net",
+					"Network Speed",
+					<>
 						<ArrowUpDown size={12} strokeWidth={2} />
 						<span className="label">
 							↑{formatBytes(netUpSpeed)} ↓{formatBytes(netDownSpeed)}
 						</span>
-					</div>
+					</>
 				);
 			default:
 				return null;
@@ -2463,7 +2677,7 @@ function App() {
 		}
 		if (bloomMode === "status" && isHovered) {
 			const totalWidgets = statusWidgets.left.length + statusWidgets.right.length;
-			return Math.min(200 + totalWidgets * 50, 380) - clock24hTrim;
+			return Math.max(Math.min(200 + totalWidgets * 50, 380) - clock24hTrim, statusFitWidth);
 		}
 		if (isMusicMode && isOpen) return mediaLayout === "compact" ? 300 : 340;
 		if ((showPowerPulse || showLowBatteryPulse || showUpdatePulse) && !isHovered) return 200;
@@ -2521,6 +2735,39 @@ function App() {
 		}
 	}, [isHovered, mediaLayout, bloomMode]);
 
+	// The pill's target geometry: the animation springs toward it, and the
+	// window region below is cut from it, so the region is already at the
+	// final size while the pill animates.
+	const pillTargetY = !isReady ? 250 : isVisible ? (isHidden ? -100 : 0) : -150;
+	const pillTargetWidth = !isReady
+		? 34
+		: isExpanded && isVisible && !isHidden
+			? getDynamicWidth()
+			: isImpacted
+				? 39.1
+				: 30.6;
+	const pillTargetHeight = !isReady ? 34 : getDynamicHeight();
+	// Shadow and the edge flares beside the pill.
+	pillTargetRef.current = notchPillBox(
+		window.innerWidth,
+		scale,
+		pillTargetY,
+		pillTargetWidth,
+		pillTargetHeight,
+		24
+	);
+
+	// Clip the notch window to what it draws (see window_region.rs): outside
+	// these rectangles the window takes no clicks, whatever its click-through
+	// state. Sent after every render, but only when the region changes.
+	useEffect(() => {
+		// Merged into the dock the notch draws nothing, so it takes no input.
+		if (windowLabel === "main") {
+			if (infoCentre) sendNotchRegion([]);
+			else updateNotchRegion();
+		}
+	});
+
 	// Merged into the dock: render nothing. A display:none notch kept its
 	// framer-motion loops running every frame for nobody (~40% of a core).
 	if (infoCentre) return <div className="screen" style={{ display: "none" }} />;
@@ -2575,15 +2822,9 @@ function App() {
 						opacity: 0
 					}}
 					animate={{
-						y: !isReady ? 250 : isVisible ? (isHidden ? -100 : 0) : -150,
-						width: !isReady
-							? 34
-							: isExpanded && isVisible && !isHidden
-								? getDynamicWidth()
-								: isImpacted
-									? 39.1
-									: 30.6,
-						height: !isReady ? 34 : getDynamicHeight(),
+						y: pillTargetY,
+						width: pillTargetWidth,
+						height: pillTargetHeight,
 						opacity: isVisible ? 1 : 0,
 						scaleX: 1,
 						scaleY: 1,
@@ -3001,6 +3242,7 @@ function App() {
 																) : !showCompactMusicIcons && isHovered && statusWidgets.left.length > 0 ? (
 																	<motion.div
 																		key="left-widgets"
+																		ref={leftWidgetsRef}
 																		className="passive-features-group"
 																		initial={{ opacity: 0 }}
 																		animate={{ opacity: 1 }}
@@ -3013,7 +3255,7 @@ function App() {
 															</div>
 
 															{/* Center - Time (always visible) */}
-															<div className="time-center">
+															<div className="time-center" ref={timeCenterRef}>
 																<AnimatePresence>
 																	{showPanelArrows && (
 																		<motion.button
@@ -3164,6 +3406,7 @@ function App() {
 																) : !showCompactMusicIcons && isHovered && statusWidgets.right.length > 0 ? (
 																	<motion.div
 																		key="right-widgets"
+																		ref={rightWidgetsRef}
 																		className="passive-features-group"
 																		initial={{ opacity: 0 }}
 																		animate={{ opacity: 1 }}

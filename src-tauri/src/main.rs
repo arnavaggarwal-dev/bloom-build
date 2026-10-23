@@ -1,14 +1,16 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 #[cfg(windows)]
+mod battery;
+#[cfg(windows)]
 mod bluetooth;
 #[cfg(windows)]
 mod cava;
 mod commands;
 mod connect;
+mod diagnostics;
 #[cfg(windows)]
 mod dock_extras;
-mod glass;
 #[cfg(target_os = "linux")]
 mod linux;
 mod services;
@@ -23,6 +25,8 @@ mod updater;
 mod utils;
 #[cfg(windows)]
 mod wifi;
+#[cfg(windows)]
+mod window_region;
 
 use std::sync::atomic::Ordering;
 use tauri::Manager;
@@ -51,6 +55,18 @@ unsafe extern "system" fn ctrl_handler(ctrl_type: u32) -> BOOL {
 }
 
 fn main() {
+    #[cfg(windows)]
+    {
+        let mut args = std::env::args_os();
+        if args.nth(1).as_deref() == Some(std::ffi::OsStr::new("--taskbar-watchdog")) {
+            if let (Some(pid), Some(marker)) = (args.next(), args.next()) {
+                if let Ok(pid) = pid.to_string_lossy().parse::<u32>() {
+                    utils::run_taskbar_watchdog(pid, marker.into());
+                }
+            }
+            return;
+        }
+    }
     #[cfg(windows)]
     unsafe {
         let _ = SetConsoleCtrlHandler(Some(ctrl_handler), true);
@@ -110,6 +126,7 @@ fn main() {
         }
     }
 
+    diagnostics::initialize();
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -135,7 +152,6 @@ fn main() {
             hide_overlay,
             set_splash_fullscreen,
             show_overlay,
-            set_overlay_hud,
             media_play_pause,
             media_next,
             media_previous,
@@ -149,8 +165,9 @@ fn main() {
             open_app,
             launch_new_instance,
             update_dock_rect,
-            glass::set_glass,
             update_notch_rect,
+            #[cfg(windows)]
+            window_region::set_window_region,
             set_dock_hovered,
             set_notch_hovered,
             set_notch_visible,
@@ -219,6 +236,10 @@ fn main() {
             open_bluetooth_settings,
             open_airplane_mode_settings,
             set_brightness,
+            #[cfg(windows)]
+            get_battery_saver_state,
+            #[cfg(windows)]
+            battery::get_battery_details,
             get_power_mode,
             cycle_power_mode,
             get_system_accent_color,
@@ -226,11 +247,9 @@ fn main() {
             get_ram_usage,
             get_disk_space,
             get_network_speed,
-            export_settings,
-            import_settings,
+            export_settings_to_file,
+            import_settings_from_file,
             reset_settings,
-            read_settings_from_path,
-            write_settings_to_path,
             updater::check_for_updates,
             updater::install_update,
             updater::get_update_state,
@@ -240,6 +259,8 @@ fn main() {
             dock_extras::open_dock_extra,
             #[cfg(windows)]
             dock_extras::eject_dock_extra,
+            #[cfg(windows)]
+            dock_extras::get_dock_drives,
             #[cfg(windows)]
             wifi::wifi_list_networks,
             #[cfg(windows)]
@@ -290,7 +311,19 @@ fn main() {
             }
 
             let window = app.get_webview_window("main").unwrap();
+            // tao rebuilds the extended style from its own flags whenever one
+            // changes (show, hide, ...). With its ignore-cursor flag on, every
+            // rebuild keeps the notch window layered, which its window region
+            // needs to stay transparent; set_click_through then drives the
+            // click-through bit directly. The worst a rebuild does is make the
+            // window click-through until the next cursor update.
+            let _ = window.set_ignore_cursor_events(true);
             let dock_win = app.get_webview_window("dock").unwrap();
+            // Same for the dock window, which has a region too.
+            let _ = dock_win.set_ignore_cursor_events(true);
+            if let Ok(hwnd) = dock_win.hwnd() {
+                DOCK_HWND.store(hwnd.0 as isize, Ordering::Relaxed);
+            }
             #[cfg(target_os = "linux")]
             crate::linux::mark_dock_windows(app.handle());
 
@@ -376,6 +409,9 @@ fn main() {
             // take effect on a window that has never been shown. Show it once
             // to register it with the compositor, then hide immediately.
             if let Some(ov_win) = app.get_webview_window("overlay") {
+                // Layered from the start, like the notch and dock (see
+                // set_click_through): the overlay has a window region too.
+                let _ = ov_win.set_ignore_cursor_events(true);
                 let _ = ov_win.show();
                 let _ = ov_win.hide();
                 let overlay_handle = app.handle().clone();
@@ -409,6 +445,7 @@ fn main() {
             setup_taskbar_hook();
             setup_audio_visualization(app.handle().clone());
             setup_settings_watcher(app.handle().clone());
+            diagnostics::record("services_ready", "hooks and settings watcher initialized");
             #[cfg(windows)]
             wifi::setup_wifi_notifications(app.handle().clone());
             #[cfg(windows)]
@@ -464,13 +501,9 @@ fn main() {
                     .menu(&menu)
                     .on_menu_event(move |_, event| match event.id().as_ref() {
                         "quit" => {
+                            diagnostics::record("shutdown", "source=tray");
                             SHUTTING_DOWN.store(true, Ordering::Relaxed);
-                            if let Some(w) = ah.get_webview_window("main") {
-                                unregister_appbar_native(w.hwnd().unwrap());
-                            }
-                            if let Some(w) = ah.get_webview_window("dock") {
-                                unregister_appbar_native(w.hwnd().unwrap());
-                            }
+                            crate::commands::release_appbars(&ah);
                             set_taskbar_visibility(true, true);
                             NATIVE_TASKBAR_HIDDEN.store(false, Ordering::Relaxed);
                             set_native_osd_suppressed(false);
@@ -478,13 +511,9 @@ fn main() {
                             ah.exit(0);
                         }
                         "restart" => {
+                            diagnostics::record("restart", "source=tray");
                             SHUTTING_DOWN.store(true, Ordering::Relaxed);
-                            if let Some(w) = ah.get_webview_window("main") {
-                                unregister_appbar_native(w.hwnd().unwrap());
-                            }
-                            if let Some(w) = ah.get_webview_window("dock") {
-                                unregister_appbar_native(w.hwnd().unwrap());
-                            }
+                            crate::commands::release_appbars(&ah);
                             if let Some(w) = ah.get_webview_window("settings") {
                                 let _ = w.destroy();
                             }
@@ -518,6 +547,7 @@ fn main() {
         .expect("error while building tauri application");
     app.run(|_, event| {
         if let tauri::RunEvent::Exit = event {
+            diagnostics::record("exit", "restoring native taskbar");
             set_taskbar_visibility(true, true);
             NATIVE_TASKBAR_HIDDEN.store(false, Ordering::Relaxed);
             set_native_osd_suppressed(false);
