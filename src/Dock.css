@@ -204,7 +204,12 @@ body {
 	gap: 12px;
 	padding: 8px 8px;
 	border-radius: 18px 18px 0 0;
-	background: var(--bloom-bg, rgba(0, 0, 0, 0.8));
+	/* Painted by the .edge-surface child (see components/EdgeSurface.css). */
+	--surface-bg: var(--bloom-bg, rgba(0, 0, 0, 0.8));
+	/* A restrained rim with a brighter, light-catching top edge. */
+	--surface-edge: var(--bloom-text, white);
+	--surface-light: white;
+	isolation: isolate;
 	border: none;
 	color: var(--bloom-text, white);
 	position: relative;
@@ -220,30 +225,22 @@ body {
 	padding: 8px 14px;
 }
 
-/* The edge: a hairline in the text colour (light on a dark bar, dark on a
-   light one) around the top and sides, so the bar stays outlined over a
-   window of its own colour. The bottom sits on the screen edge, except for
-   the collapsed pill, which is outlined all round. */
+/* Merged mode: the bar's surface is .dock-sheet, which stretches up behind
+   the info panel as it opens (Dock.tsx, stretch), one shape whose rounded
+   top rides up and back down. The bar's own edge surface paints nothing. */
+.dock.ic-on > .edge-surface {
+	display: none;
+}
+/* The sheet's edge: a hairline in the text colour around the top and sides
+   (all round on the collapsed pill), so it stays outlined over a window of
+   its own colour. */
 :root {
 	--dock-edge: color-mix(in srgb, var(--bloom-text, #fff) 22%, transparent);
 }
-.dock,
 .dock-sheet {
 	box-shadow:
 		inset 1px 1px 0 var(--dock-edge),
 		inset -1px 0 0 var(--dock-edge);
-}
-.dock:not(.dock-expanded):not(.dock-impacted) {
-	box-shadow: inset 0 0 0 1px var(--dock-edge);
-}
-
-/* Merged mode: the bar's surface is .dock-sheet, which stretches up behind
-   the info panel as it opens (Dock.tsx, stretch), one shape whose rounded
-   top rides up and back down. The bar itself paints nothing. */
-.dock.ic-on,
-.dock.ic-on:not(.dock-expanded):not(.dock-impacted) {
-	background: transparent;
-	box-shadow: none;
 }
 .dock-sheet {
 	position: absolute;

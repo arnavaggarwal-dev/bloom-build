@@ -38,6 +38,32 @@ pub async fn set_dock_hovered(hovered: bool) {
 }
 
 #[tauri::command]
+pub fn set_dock_popup_active(app: AppHandle, window: Window, active: bool) {
+    if window.label() != "dock" {
+        return;
+    }
+    let active = active && crate::services::dock_popup_allowed();
+    let start_open = active && is_start_menu_open();
+    let press_ms = DOCK_START_PRESS_MS.swap(0, Ordering::Relaxed);
+    let recent_start_press = press_ms > 0 && (0..=1000).contains(&(get_now_ms() - press_ms));
+    let keep_visible = active
+        && (start_open || recent_start_press || DOCK_SHELL_INTERACTION.load(Ordering::Relaxed));
+    if DOCK_SHELL_INTERACTION.swap(keep_visible, Ordering::Relaxed) != keep_visible {
+        let _ = app.emit_to("dock", "dock-shell-interaction", keep_visible);
+    }
+    if start_open {
+        // Start's shell surface may live above ordinary topmost windows. Close
+        // it on deliberate dock use, rather than endlessly fighting its z-order.
+        send_key_tap(windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE);
+    }
+    if active {
+        if let Ok(hwnd) = window.hwnd() {
+            re_assert_topmost(hwnd);
+        }
+    }
+}
+
+#[tauri::command]
 pub async fn set_notch_hovered(app: AppHandle, hovered: bool) {
     NOTCH_IS_HOVERED.store(hovered, Ordering::Relaxed);
     // Re-evaluate right away. During a native drag the webview never sees the
@@ -133,9 +159,14 @@ pub fn shelf_drag_icon() -> Option<String> {
 }
 
 #[tauri::command]
-pub async fn update_dock_rect(rect: IntRect) {
+pub async fn update_dock_rect(rect: IntRect, overlap_rect: Option<IntRect>) {
     if let Ok(mut r) = DOCK_RECT.lock() {
         *r = Some(rect);
+    }
+    if let Some(rect) = overlap_rect {
+        if let Ok(mut r) = DOCK_OVERLAP_RECT.lock() {
+            *r = Some(rect);
+        }
     }
 }
 
@@ -278,9 +309,8 @@ pub async fn init_dock(app: AppHandle, mode: String) {
                             if dock_enabled()
                                 && dock_clone.show().is_ok()
                                 && dock_clone.is_visible().unwrap_or(false)
-                                && set_taskbar_visibility(false, false)
                             {
-                                NATIVE_TASKBAR_HIDDEN.store(true, Ordering::Relaxed);
+                                crate::utils::keep_taskbar_hidden();
                             }
                             break;
                         }
@@ -314,6 +344,9 @@ fn disable_dock(app: &AppHandle) {
     if !set_taskbar_visibility(true, true) {
         return;
     }
+    DOCK_SHELL_INTERACTION.store(false, Ordering::Relaxed);
+    DOCK_START_PRESS_MS.store(0, Ordering::Relaxed);
+    let _ = app.emit_to("dock", "dock-shell-interaction", false);
     if let Some(dock_win) = app.get_webview_window("dock") {
         disable_dock_appbar(dock_win);
     }
@@ -448,9 +481,8 @@ pub async fn change_dock_mode(app: AppHandle, mode: String) {
                                 if dock_enabled()
                                     && dock_clone.show().is_ok()
                                     && dock_clone.is_visible().unwrap_or(false)
-                                    && set_taskbar_visibility(false, false)
                                 {
-                                    NATIVE_TASKBAR_HIDDEN.store(true, Ordering::Relaxed);
+                                    crate::utils::keep_taskbar_hidden();
                                 }
                                 break;
                             }
@@ -578,16 +610,8 @@ fn get_uwp_launch_cmd(exe_path: &str) -> Option<String> {
     None
 }
 
-/// Duplicate-event guard. Kept well below the double-click interval so a
-/// double-click still toggles twice.
-const START_TOGGLE_DEBOUNCE_MS: i64 = 80;
-/// Hold time for the Windows key so the shell registers a deliberate tap.
-/// A zero-length tap is dropped by the shell and never opens Start.
 #[cfg(windows)]
-const START_WIN_KEY_HOLD_MS: u64 = 40;
-
-#[cfg(windows)]
-fn send_key_tap(vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY, hold_ms: u64) {
+fn send_key_tap(vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY) {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, KEYBDINPUT, KEYEVENTF_KEYUP,
     };
@@ -617,9 +641,6 @@ fn send_key_tap(vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY, ho
     }];
     unsafe {
         SendInput(&down, std::mem::size_of::<INPUT>() as i32);
-        if hold_ms > 0 {
-            std::thread::sleep(std::time::Duration::from_millis(hold_ms));
-        }
         SendInput(&up, std::mem::size_of::<INPUT>() as i32);
     }
 }
@@ -667,12 +688,8 @@ pub fn is_start_menu_open() -> bool {
     }
 }
 
-/// Toggle the native Start menu. Checks whether the menu currently owns the
-/// foreground window instead of blindly tapping Win: rapid Win taps are ignored
-/// by the shell while the menu animates, which made a second click replay the
-/// open animation. When the menu is open it is dismissed with Escape, which is
-/// deterministic. The tiny debounce only coalesces duplicate events; it must
-/// stay well below the double-click interval so a double-click still closes.
+/// Open Start through Explorer, independently of the foreground app's integrity
+/// level. An open menu is dismissed with Escape rather than another open request.
 ///
 /// Start also closes itself on the press of a click outside it, the Start
 /// button included, so by the time the click arrives the menu is often gone.
@@ -680,11 +697,6 @@ pub fn is_start_menu_open() -> bool {
 /// was, the press closed it and the click leaves it closed, however long the
 /// button was held.
 fn toggle_start_menu() {
-    let now = get_now_ms();
-    if now - LAST_START_TOGGLE_MS.load(Ordering::Relaxed) < START_TOGGLE_DEBOUNCE_MS {
-        return;
-    }
-    LAST_START_TOGGLE_MS.store(now, Ordering::Relaxed);
     // Taken here, so a press is only ever used by the click it started.
     let open_at_press = START_OPEN_AT_PRESS.swap(false, Ordering::Relaxed);
 
@@ -692,11 +704,25 @@ fn toggle_start_menu() {
     tauri::async_runtime::spawn_blocking(crate::linux::tap_super_key);
     #[cfg(windows)]
     tauri::async_runtime::spawn_blocking(move || {
-        use windows::Win32::UI::Input::KeyboardAndMouse::{VK_ESCAPE, VK_LWIN};
+        use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            FindWindowW, PostMessageW, SC_TASKLIST, WM_SYSCOMMAND,
+        };
         if is_start_menu_open() {
-            send_key_tap(VK_ESCAPE, 0);
+            send_key_tap(VK_ESCAPE);
         } else if !open_at_press {
-            send_key_tap(VK_LWIN, START_WIN_KEY_HOLD_MS);
+            // Ask Explorer directly. SendInput can be blocked while an elevated
+            // app owns the foreground; opening Settings happened to avoid that.
+            unsafe {
+                if let Ok(tray) = FindWindowW(windows::core::w!("Shell_TrayWnd"), None) {
+                    let _ = PostMessageW(
+                        Some(tray),
+                        WM_SYSCOMMAND,
+                        windows::Win32::Foundation::WPARAM(SC_TASKLIST as usize),
+                        windows::Win32::Foundation::LPARAM(0),
+                    );
+                }
+            }
         }
     });
 }
@@ -2495,22 +2521,43 @@ pub fn hide_native_osd() {
 
 #[tauri::command]
 pub fn open_settings_window(app: AppHandle) {
-    if let Some(win) = app.get_webview_window("settings") {
-        let _ = win.show();
-        let _ = win.unminimize();
-        let _ = win.set_focus();
-        #[cfg(windows)]
-        if let Ok(hwnd) = win.hwnd() {
-            unsafe {
-                use windows::Win32::UI::WindowsAndMessaging::{
-                    SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
-                };
-                let _ = ShowWindow(hwnd, SW_SHOW);
-                let _ = ShowWindow(hwnd, SW_RESTORE);
-                let _ = SetForegroundWindow(hwnd);
+    // WebView2 creation must run off the Windows UI thread, including tray callbacks.
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = crate::settings_window::with_window(&app, |win, created| {
+            if SHUTTING_DOWN.load(Ordering::Relaxed) {
+                return;
             }
+            if created {
+                #[cfg(windows)]
+                let _ = window_vibrancy::apply_mica(win, None);
+                crate::services::watch_webview_process(&app, win);
+            }
+            let _ = win.show();
+            let _ = win.unminimize();
+            let _ = win.set_focus();
+            #[cfg(windows)]
+            if let Ok(hwnd) = win.hwnd() {
+                unsafe {
+                    use windows::Win32::UI::WindowsAndMessaging::{
+                        SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
+                    };
+                    let _ = ShowWindow(hwnd, SW_SHOW);
+                    let _ = ShowWindow(hwnd, SW_RESTORE);
+                    let _ = SetForegroundWindow(hwnd);
+                }
+            }
+        });
+        if let Err(error) = result {
+            eprintln!("Failed to open Bloom settings: {error}");
         }
-    }
+    });
+}
+
+#[tauri::command]
+pub async fn close_settings_window(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || crate::settings_window::close(&app))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -2808,8 +2855,7 @@ pub fn open_system_tray() {
 
                 // Once closed, hide the taskbar only if the dock is still enabled.
                 if dock_enabled() {
-                    let hidden = crate::utils::set_taskbar_visibility(false, false);
-                    crate::state::NATIVE_TASKBAR_HIDDEN.store(hidden, Ordering::Relaxed);
+                    crate::utils::keep_taskbar_hidden();
                 }
 
                 // Revert transparency
@@ -2832,8 +2878,7 @@ pub fn open_system_tray() {
             });
         } else {
             // If already toggled on manually, toggle off
-            let hidden = crate::utils::set_taskbar_visibility(false, false);
-            crate::state::NATIVE_TASKBAR_HIDDEN.store(hidden, Ordering::Relaxed);
+            crate::utils::keep_taskbar_hidden();
 
             let exstyle = GetWindowLongA(hwnd, GWL_EXSTYLE);
             let _ = SetLayeredWindowAttributes(
@@ -3441,8 +3486,12 @@ fn re_register_appbars(app: &AppHandle, settings: &HashMap<String, serde_json::V
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_setting(app: AppHandle, key: String, value: serde_json::Value) -> Result<(), String> {
+    // Async command workers must emit in commit order: a later save must not
+    // broadcast before an earlier one and leave windows on an older value.
+    static SAVE_COMMAND_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _save_guard = SAVE_COMMAND_LOCK.lock().map_err(|e| e.to_string())?;
     let path = app
         .path()
         .app_config_dir()
@@ -3451,7 +3500,10 @@ pub fn save_setting(app: AppHandle, key: String, value: serde_json::Value) -> Re
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let settings = crate::utils::save_setting_file(&path, key.clone(), value)?;
+    let settings = crate::utils::save_setting_file(&path, key.clone(), value).map_err(|error| {
+        crate::diagnostics::record("settings_save_failed", &format!("key={key} error={error}"));
+        error
+    })?;
 
     // Broadcast so all windows sync — emit the key as-is (bloom-prefixed)
     let _ = app.emit(
@@ -4468,8 +4520,6 @@ pub fn setup_settings_watcher(app: AppHandle) {
             CreateFileW, ReadDirectoryChangesW, FILE_FLAG_BACKUP_SEMANTICS, FILE_LIST_DIRECTORY,
             FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, OPEN_EXISTING,
         };
-        use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
-        use windows::Win32::System::IO::OVERLAPPED;
 
         unsafe {
             let dir_path: Vec<u16> = config_dir
@@ -4493,28 +4543,19 @@ pub fn setup_settings_watcher(app: AppHandle) {
                 _ => return,
             };
 
-            let h_event = match CreateEventW(None, false, false, None) {
-                Ok(e) => e,
-                Err(_) => {
-                    let _ = CloseHandle(dir_handle);
-                    return;
-                }
-            };
-
-            let mut notify_buffer = [0u8; 4096];
+            // ReadDirectoryChangesW requires DWORD-aligned storage.
+            let mut notify_buffer = [0u32; 1024];
             let mut bytes_returned = 0u32;
-            let mut overlapped = OVERLAPPED::default();
-            overlapped.hEvent = h_event;
 
             loop {
                 let success = ReadDirectoryChangesW(
                     dir_handle,
                     notify_buffer.as_mut_ptr() as *mut _,
-                    notify_buffer.len() as u32,
+                    std::mem::size_of_val(&notify_buffer) as u32,
                     false,
                     FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_FILE_NAME,
                     Some(&mut bytes_returned),
-                    Some(&mut overlapped),
+                    None,
                     None,
                 );
 
@@ -4522,14 +4563,14 @@ pub fn setup_settings_watcher(app: AppHandle) {
                     break;
                 }
 
-                WaitForSingleObject(h_event, INFINITE);
-
+                // The directory was opened synchronously: ReadDirectoryChangesW
+                // already waited. An OVERLAPPED event on this handle is ignored
+                // and waiting on it would stall the watcher after its first change.
                 std::thread::sleep(std::time::Duration::from_millis(200));
 
                 reload_settings(&app, &settings_path);
             }
 
-            let _ = CloseHandle(h_event);
             let _ = CloseHandle(dir_handle);
         }
     });

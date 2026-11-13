@@ -6,11 +6,14 @@ import "./Dock.css";
 import { initTheme } from "./theme";
 import { useBoolSetting, useSettingsSync } from "./hooks/useSettingsSync";
 import { reloadIfMirrorWasStale } from "./hooks/settingsMirror";
+import { dockOverlapSpan } from "./dockGeometry";
+import { EdgeSurface } from "./components/EdgeSurface";
 import { DOCK_SPRING, InfoLeft, InfoPanel, InfoProvider, InfoRight, PANEL_HEIGHT, type InfoTab } from "./InfoCentre";
 import { ChevronUp, Keyboard } from "lucide-react";
 import { useInfoCentre } from "./hooks/useInfoCentre";
 
 import {
+	dockIconKey,
 	matchesPackagedExecutable,
 	mergeTrayApps,
 	selectDockTrayApps,
@@ -193,6 +196,8 @@ const Dock = memo(function Dock() {
 	const [pinnedApps, setPinnedApps] = useState<AppInfo[]>([]);
 	const [activeApps, setActiveApps] = useState<AppInfo[]>([]);
 	const iconsRef = useRef<Record<string, string>>({});
+	const pendingIconsRef = useRef(new Set<string>());
+	const iconGenerationRef = useRef(0);
 	const [, setIconsTick] = useState(0);
 	const [dockMode, setDockMode] = useState(() => {
 		const raw = localStorage.getItem("bloom-dock-mode") || "smart";
@@ -201,6 +206,12 @@ const Dock = memo(function Dock() {
 	});
 	const [dockPreviewEnabled, setDockPreviewEnabled] = useState(
 		() => localStorage.getItem("bloom-dock-preview-enabled") !== "false"
+	);
+	const [dockShowBackgroundApps, setDockShowBackgroundApps] = useState(
+		() => localStorage.getItem("bloom-dock-show-background-apps") !== "false"
+	);
+	const [edgeShineEnabled, setEdgeShineEnabled] = useState(
+		() => localStorage.getItem("bloom-edge-shine-enabled") !== "false"
 	);
 	const [dockIconOnly, setDockIconOnly] = useState(
 		() => localStorage.getItem("bloom-dock-icon-only") === "true"
@@ -247,7 +258,9 @@ const Dock = memo(function Dock() {
 	const [isDockHovered, setIsDockHovered] = useState(false);
 	const [isEdgeHovered, setIsEdgeHovered] = useState(false);
 	const [isOverlapped, setIsOverlapped] = useState(false);
-	const [isVisible, setIsVisible] = useState(true);
+	const [systemVisible, setIsVisible] = useState(true);
+	const [shellInteraction, setShellInteraction] = useState(false);
+	const isVisible = systemVisible || shellInteraction;
 	const [showAddPopup, setShowAddPopup] = useState(false);
 	const [nativeMenuOpen, setNativeMenuOpen] = useState(false);
 	// Every tray icon, for the ^ popover (merged mode): the dock itself only
@@ -438,13 +451,26 @@ const Dock = memo(function Dock() {
 					);
 				}
 				const hasPreview = !!previewData;
+				const content = dockRef.current.querySelector<HTMLElement>(".dock-reorder-container");
+				const style = getComputedStyle(dockRef.current);
+				const overlap = content
+					? dockOverlapSpan(
+							window.innerWidth,
+							content.scrollWidth,
+							parseFloat(style.paddingLeft) + parseFloat(style.paddingRight),
+							scale
+						)
+					: null;
 				invoke("update_dock_rect", {
 					rect: {
 						x: Math.round(rect.x) - (hasPreview ? 500 : 0),
 						y: Math.round(rect.y) - (hasPreview ? 320 : 0),
 						width: Math.round(rect.width) + (hasPreview ? 1000 : 0),
 						height: Math.round(rect.height) + (hasPreview ? 320 : 0)
-					}
+					},
+					overlapRect: overlap
+						? { ...overlap, y: Math.round(rect.y), height: Math.round(rect.height) }
+						: null
 				}).catch(() => {});
 			}
 		};
@@ -454,12 +480,14 @@ const Dock = memo(function Dock() {
 		window.addEventListener("resize", updateRect);
 		const observer = new ResizeObserver(updateRect);
 		if (dockRef.current) observer.observe(dockRef.current);
+		const content = dockRef.current?.querySelector(".dock-reorder-container");
+		if (content) observer.observe(content);
 
 		return () => {
 			window.removeEventListener("resize", updateRect);
 			observer.disconnect();
 		};
-	}, [pinnedApps, activeApps, isHidden, previewData, scale]);
+	}, [pinnedApps, activeApps, isHidden, isExpanded, previewData, scale]);
 
 	useEffect(() => {
 		const init = async () => {
@@ -481,6 +509,8 @@ const Dock = memo(function Dock() {
 
 			const preview = getVal("bloom-dock-preview-enabled", "true");
 			setDockPreviewEnabled(preview === "true");
+			setDockShowBackgroundApps(getVal("bloom-dock-show-background-apps") !== "false");
+			setEdgeShineEnabled(getVal("bloom-edge-shine-enabled", "true") !== "false");
 
 			const iconOnly = getVal("bloom-dock-icon-only", "false");
 			setDockIconOnly(iconOnly === "true");
@@ -505,7 +535,7 @@ const Dock = memo(function Dock() {
 
 			const pinned = await invoke<AppInfo[]>("load_pinned_apps");
 			setPinnedApps(pinned.map((a) => ({ ...a, is_pinned: true })));
-			pinned.forEach((app) => fetchIcon(app.path));
+			pinned.forEach((app) => fetchIcon(app.path, app.name));
 
 			// Apps pinned on the Windows taskbar join the dock, each only the
 			// first time Bloom sees it there, so unpinning one here sticks.
@@ -595,6 +625,8 @@ const Dock = memo(function Dock() {
 	useSettingsSync({
 		"bloom-dock-mode": setDockMode,
 		"bloom-dock-preview-enabled": setDockPreviewEnabled,
+		"bloom-dock-show-background-apps": { set: setDockShowBackgroundApps, defaultValue: true },
+		"bloom-edge-shine-enabled": setEdgeShineEnabled,
 		"bloom-dock-icon-only": setDockIconOnly,
 		"bloom-dock-separator-enabled": setDockSeparatorEnabled,
 		"bloom-dock-adaptive": setDockAdaptive,
@@ -727,6 +759,7 @@ const Dock = memo(function Dock() {
 					: next;
 			});
 
+			pinnedApps.forEach((app) => fetchIcon(app.path, app.name));
 			running.forEach((app) => fetchIcon(app.path, app.name, app.hwnd));
 		};
 
@@ -746,39 +779,42 @@ const Dock = memo(function Dock() {
 		};
 	}, [isDragging, pinnedApps]);
 
-	const fetchIcon = async (path: string, name?: string, hwnd?: number, retryCount = 0) => {
+	const fetchIcon = async (path: string, name?: string, hwnd?: number) => {
 		const isHost = isBrowserHost(path);
 		const cacheKey =
 			isHost && name ? `${path}:${name.toLowerCase()}` : hwnd ? `${path}-${hwnd}` : path;
 
-		if (iconsRef.current[cacheKey]) return;
+		if (iconsRef.current[cacheKey] || pendingIconsRef.current.has(cacheKey)) return;
+		pendingIconsRef.current.add(cacheKey);
+		const generation = iconGenerationRef.current;
 		try {
 			const icon = await invoke<string | null>("get_app_icon", {
 				path,
 				name: name || null,
 				hwnd: hwnd || null
 			});
-			if (icon) {
+			if (icon && generation === iconGenerationRef.current) {
 				iconsRef.current[cacheKey] = icon;
 				if (!isHost) iconsRef.current[path] = icon;
 				setIconsTick((t) => t + 1);
-			} else if (retryCount < 3 && !hwnd) {
-				setTimeout(() => fetchIcon(path, name, undefined, retryCount + 1), 3000 * (retryCount + 1));
 			}
 		} catch (e) {
 			console.error(`Failed to fetch icon for ${path}:`, e);
-			if (retryCount < 3 && !hwnd) {
-				setTimeout(() => fetchIcon(path, name, undefined, retryCount + 1), 3000 * (retryCount + 1));
-			}
+		} finally {
+			// Window changes and the existing poll retry missing icons. Only an
+			// actual in-flight request is excluded; no timer can retain a stale HWND.
+			if (generation === iconGenerationRef.current) pendingIconsRef.current.delete(cacheKey);
 		}
 	};
 
 	const handleClearIconCache = async () => {
 		try {
 			await invoke("clear_icon_cache");
+			iconGenerationRef.current += 1;
+			pendingIconsRef.current.clear();
 			iconsRef.current = {};
 			setIconsTick((t) => t + 1);
-			pinnedApps.forEach((app) => fetchIcon(app.path));
+			pinnedApps.forEach((app) => fetchIcon(app.path, app.name));
 		} catch (e) {
 			console.error("Failed to clear icon cache:", e);
 		}
@@ -1281,6 +1317,8 @@ const Dock = memo(function Dock() {
 				return {
 					...p,
 					is_running: !!running,
+					icon_path: running?.path,
+					icon_name: running?.name,
 					hwnd: running?.hwnd,
 					all_hwnds: running?.all_hwnds,
 					tray_ids: running?.tray_ids,
@@ -1293,16 +1331,47 @@ const Dock = memo(function Dock() {
 			.map((id) => activeApps.find((a) => appIdentity(a.path, a.executable, a.name) === id))
 			.filter(
 				(a): a is AppInfo =>
-					!!a && !matchedRunningKeys.has(appIdentity(a.path, a.executable, a.name))
+					!!a && (dockShowBackgroundApps || !a.is_background) && !matchedRunningKeys.has(itemKey(a))
 			);
 
 		return [...pinned, ...unpinned];
-	}, [pinnedApps, activeApps, activeOrder]);
+	}, [pinnedApps, activeApps, activeOrder, dockShowBackgroundApps]);
 
 	const startItem = useMemo(
 		() => dockItems.find((i) => i.path === "start") as AppInfo,
 		[dockItems]
 	);
+	// Only a deliberate icon hover dismisses Start. Once dismissed, the session
+	// belongs to the whole dock, including the gaps between icons and its popups.
+	const dockPopupRequested = !!contextMenu || showAddPopup || nativeMenuOpen;
+	const dockHoverTarget =
+		hoveredApp !== null && (!startItem || hoveredApp !== itemKey(startItem)) ? hoveredApp : null;
+	const keepShellInteraction =
+		shellInteraction && (isDockHovered || !!previewData || dockPopupRequested);
+	useEffect(() => {
+		const report = (active: boolean) => {
+			void invoke("set_dock_popup_active", { active }).catch(console.error);
+		};
+		if (dockPopupRequested || keepShellInteraction) {
+			report(true);
+			return;
+		}
+		// Cancel short pass-overs; restarting for a different icon requires a
+		// fresh dwell. A brief leave grace bridges the dock-to-popup handoff.
+		const timer = setTimeout(() => report(dockHoverTarget !== null), dockHoverTarget ? 350 : 250);
+		return () => clearTimeout(timer);
+	}, [dockPopupRequested, dockHoverTarget, keepShellInteraction]);
+	useEffect(() => {
+		let disposed = false;
+		const unlisten = listen<boolean>("dock-shell-interaction", ({ payload }) => {
+			if (!disposed) setShellInteraction(payload);
+		});
+		return () => {
+			disposed = true;
+			void unlisten.then((stop) => stop());
+			void invoke("set_dock_popup_active", { active: false });
+		};
+	}, []);
 	const pinnedItems = useMemo(
 		() => dockItems.filter((i) => i.path !== "start" && i.is_pinned),
 		[dockItems]
@@ -1593,6 +1662,7 @@ const Dock = memo(function Dock() {
 					style={{ originX: 0.5, originY: 1 }}
 					onContextMenu={(e) => handleContextMenu(e, null)}
 				>
+					<EdgeSurface edge="bottom" flares={isExpanded && !isHidden} reflective={edgeShineEnabled} resolutionScale={scale} />
 					{infoCentre && <motion.div className="dock-sheet" style={{ top: sheetTop }} />}
 					<AnimatePresence>
 						{isExpanded && (
@@ -1820,6 +1890,7 @@ const Dock = memo(function Dock() {
 														const icon =
 															customIcons[cacheKey] ||
 															(allowPathFallback && customIcons[app.path]) ||
+															iconsRef.current[dockIconKey(app, isHost)] ||
 															iconsRef.current[cacheKey] ||
 															(allowPathFallback && iconsRef.current[app.path]) ||
 															app.icon;
@@ -1842,7 +1913,7 @@ const Dock = memo(function Dock() {
 													})()}
 													<IconStatus status={statusOf(app)} />
 												</motion.div>
-												{app.is_running && (
+												{app.is_running && (dockShowBackgroundApps || !app.is_background) && (
 													<WindowDots
 														count={app.all_hwnds?.length ?? 1}
 														background={app.is_background}
@@ -1980,6 +2051,7 @@ const Dock = memo(function Dock() {
 												const icon =
 													customIcons[cacheKey] ||
 													(allowPathFallback && customIcons[app.path]) ||
+													iconsRef.current[dockIconKey(app, isHost)] ||
 													iconsRef.current[cacheKey] ||
 													(allowPathFallback && iconsRef.current[app.path]) ||
 													app.icon;

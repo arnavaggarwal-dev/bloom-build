@@ -1657,6 +1657,13 @@ pub fn setup_system_worker(app_handle: AppHandle) -> Sender<SystemCommand> {
                 if !found_window {
                     hwnd = HWND(std::ptr::null_mut());
                 }
+                // Overlap uses the expanded content width. Hit-testing still
+                // uses DOCK_RECT, which includes the live pill and previews.
+                let overlap_span = DOCK_OVERLAP_RECT
+                    .lock()
+                    .ok()
+                    .and_then(|r| *r)
+                    .map(|r| dock_span_px(r, cached_scale));
 
                 let dock_span = DOCK_RECT
                     .lock()
@@ -1795,12 +1802,10 @@ pub fn setup_system_worker(app_handle: AppHandle) -> Sender<SystemCommand> {
                                     } else if is_primary {
                                         should_overlap = false;
                                         if let Some(span) = overlap_span {
-                                            let res_h = (56.0 * cached_scale) as i32;
-                                            let trigger_y = screen_rect.bottom - res_h;
                                             should_overlap = window_reaches_dock(
                                                 span,
                                                 (rect.left, rect.right, rect.bottom),
-                                                trigger_y,
+                                                screen_rect.bottom - (56.0 * cached_scale) as i32,
                                             );
                                         }
 
@@ -2383,6 +2388,10 @@ static CAPTURE_RECHECK: AtomicBool = AtomicBool::new(true);
 #[cfg(windows)]
 static CAPTURE_LAST_SCAN_MS: AtomicI64 = AtomicI64::new(0);
 
+pub fn dock_popup_allowed() -> bool {
+    !CAPTURE_UI_ACTIVE.load(Ordering::Relaxed) && !SHUTTING_DOWN.load(Ordering::Relaxed)
+}
+
 /// Recognizes the native Start/Search surface by its host process. Its window
 /// title is localized, so title-only checks make Smart dock overlap detection
 /// hide the dock on non-English Windows.
@@ -2670,6 +2679,12 @@ fn capture_ui_state(app: &AppHandle) -> (bool, bool) {
 fn apply_capture_ui_state(app: &AppHandle, active: bool, notch_blocked: bool) {
     if SHUTTING_DOWN.load(Ordering::Relaxed) {
         return;
+    }
+    if active && DOCK_SHELL_INTERACTION.swap(false, Ordering::Relaxed) {
+        let _ = app.emit_to("dock", "dock-shell-interaction", false);
+    }
+    if active {
+        DOCK_START_PRESS_MS.store(0, Ordering::Relaxed);
     }
     if let Some(main_win) = app.get_webview_window("main") {
         if notch_blocked {
@@ -3185,7 +3200,7 @@ fn update_dock_interaction(
     now: i64,
     fg_fs: bool,
 ) {
-    if fg_fs {
+    if fg_fs && !DOCK_SHELL_INTERACTION.load(Ordering::Relaxed) {
         // Fullscreen foreground app or capture overlay: the dock must not
         // intercept input (e.g. a Snipping Tool selection ending at the
         // bottom edge), so keep it click-through.
@@ -3383,6 +3398,11 @@ unsafe extern "system" fn mouse_hook_proc(
     // use. A cheap foreground check, and only on presses.
     if code >= 0 && wparam.0 == WM_LBUTTONDOWN as usize {
         START_OPEN_AT_PRESS.store(crate::commands::is_start_menu_open(), Ordering::Relaxed);
+    }
+    if code >= 0 && wparam.0 == WM_RBUTTONDOWN as usize {
+        let point = (*(lparam.0 as *const MSLLHOOKSTRUCT)).pt;
+        let start_press = dock_takes_press(point) && crate::commands::is_start_menu_open();
+        DOCK_START_PRESS_MS.store(if start_press { now_ms() } else { 0 }, Ordering::Relaxed);
     }
     // A dock menu or the Add App popup closes when you press outside it. The
     // dock window's region keeps it from catching that press, so the dock
@@ -4319,8 +4339,8 @@ fn register_dock_appbar_inner(window: tauri::WebviewWindow, attempt: i32) {
             if !window.is_visible().unwrap_or(false) && window.show().is_err() {
                 return;
             }
-            if window.is_visible().unwrap_or(false) && set_taskbar_visibility(false, false) {
-                NATIVE_TASKBAR_HIDDEN.store(true, Ordering::Relaxed);
+            if window.is_visible().unwrap_or(false) {
+                crate::utils::keep_taskbar_hidden();
             }
         }
     } else {
@@ -4969,41 +4989,49 @@ static RECOVERING_FROM_WEBVIEW_FAILURE: AtomicBool = AtomicBool::new(false);
 pub fn watch_webview_processes(app: &AppHandle) {
     let _ = WEBVIEWS_WATCHED_AT.set(Instant::now());
     for (_, window) in app.webview_windows() {
-        let handle = app.clone();
-        let _ = window.with_webview(move |webview| unsafe {
-            use webview2_com::Microsoft::Web::WebView2::Win32::{
-                COREWEBVIEW2_PROCESS_FAILED_KIND,
-                COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED,
-                COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED,
-            };
-            use webview2_com::ProcessFailedEventHandler;
-
-            let Ok(core) = webview.controller().CoreWebView2() else {
-                return;
-            };
-            let mut token = 0i64;
-            let _ = core.add_ProcessFailed(
-                &ProcessFailedEventHandler::create(Box::new(move |_, args| {
-                    let Some(args) = args else {
-                        return Ok(());
-                    };
-                    let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
-                    args.ProcessFailedKind(&mut kind)?;
-                    if kind == COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED
-                        || kind == COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED
-                    {
-                        crate::diagnostics::record(
-                            "webview_failure",
-                            &format!("process_kind={kind:?}"),
-                        );
-                        recover_from_webview_failure(&handle);
-                    }
-                    Ok(())
-                })),
-                &mut token,
-            );
-        });
+        watch_webview_process(app, &window);
     }
+}
+
+#[cfg(not(windows))]
+pub fn watch_webview_process(_app: &AppHandle, _window: &tauri::WebviewWindow) {}
+
+#[cfg(windows)]
+pub fn watch_webview_process(app: &AppHandle, window: &tauri::WebviewWindow) {
+    let handle = app.clone();
+    let _ = window.with_webview(move |webview| unsafe {
+        use webview2_com::Microsoft::Web::WebView2::Win32::{
+            COREWEBVIEW2_PROCESS_FAILED_KIND,
+            COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED,
+            COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED,
+        };
+        use webview2_com::ProcessFailedEventHandler;
+
+        let Ok(core) = webview.controller().CoreWebView2() else {
+            return;
+        };
+        let mut token = 0i64;
+        let _ = core.add_ProcessFailed(
+            &ProcessFailedEventHandler::create(Box::new(move |_, args| {
+                let Some(args) = args else {
+                    return Ok(());
+                };
+                let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
+                args.ProcessFailedKind(&mut kind)?;
+                if kind == COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED
+                    || kind == COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED
+                {
+                    crate::diagnostics::record(
+                        "webview_failure",
+                        &format!("process_kind={kind:?}"),
+                    );
+                    recover_from_webview_failure(&handle);
+                }
+                Ok(())
+            })),
+            &mut token,
+        );
+    });
 }
 
 #[cfg(windows)]
@@ -5033,6 +5061,40 @@ fn recover_from_webview_failure(handle: &AppHandle) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn smart_dock_overlap_uses_the_expanded_bar_instead_of_the_live_pill() {
+        let expanded = super::dock_span_px(
+            crate::types::IntRect {
+                x: 320,
+                y: 0,
+                width: 640,
+                height: 56,
+            },
+            1.5,
+        );
+        assert_eq!(expanded, (480, 1440));
+        let pill = (935, 985);
+        let run_dialog = (12, 620, 1190);
+        let trigger_y = 1116;
+        assert!(super::window_reaches_dock(expanded, run_dialog, trigger_y));
+        assert!(!super::window_reaches_dock(pill, run_dialog, trigger_y));
+        assert!(!super::window_reaches_dock(
+            expanded,
+            (12, 620, 900),
+            trigger_y
+        ));
+        assert!(!super::window_reaches_dock(
+            expanded,
+            (0, 400, 1190),
+            trigger_y
+        ));
+        assert!(!super::window_reaches_dock(
+            expanded,
+            (1500, 1800, 1190),
+            trigger_y
+        ));
+    }
+
     #[cfg(windows)]
     use super::{
         is_helper_name, is_launchable_entry, is_primary_monitor, is_start_menu_process_path,

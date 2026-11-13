@@ -7,6 +7,7 @@ import type { UpdateCheckResult } from "../updater";
 import { useSettingsSync } from "../hooks/useSettingsSync";
 import { reloadIfMirrorWasStale } from "../hooks/settingsMirror";
 import { hexToHsl } from "../theme";
+import { waitForPendingSaves } from "./pendingSaves";
 import {
 	addCustomFolder,
 	removeCustomFolder,
@@ -25,15 +26,33 @@ function readBool(val: string | null): boolean {
 	return val === "true";
 }
 
+/** The notch panels a click can open. */
+export type NotchPanelChoice = "calendar" | "command-center" | "devices";
+
+function asPanelChoice(val: unknown): NotchPanelChoice {
+	return val === "command-center" || val === "devices" ? val : "calendar";
+}
+
 export function useSettings() {
+	const [isLoaded, setIsLoaded] = useState(false);
 	const [saveError, setSaveError] = useState(
 		() => sessionStorage.getItem("bloom-settings-save-error") !== null
 	);
+	const [saveErrorDetail, setSaveErrorDetail] = useState(
+		() => sessionStorage.getItem("bloom-settings-save-error-detail") || ""
+	);
 	const saveQueue = useRef<Promise<void>>(Promise.resolve());
 	const saveFailed = useRef(false);
+	const flushPendingSaves = useCallback(async () => {
+		await waitForPendingSaves(() => saveQueue.current);
+		return !saveFailed.current;
+	}, []);
 	const [autostart, setAutostart] = useState(false);
 	const [weatherEnabled, setWeatherEnabled] = useState(true);
+	const [calendarMondayFirst, setCalendarMondayFirst] = useState(false);
 	const [calendarEnabled, setCalendarEnabled] = useState(true);
+	const [controlsPanelEnabled, setControlsPanelEnabled] = useState(true);
+	const [devicesPanelEnabled, setDevicesPanelEnabled] = useState(false);
 	const [infoCentre, setInfoCentre] = useState(
 		() => localStorage.getItem("bloom-info-centre") === "true"
 	);
@@ -45,9 +64,8 @@ export function useSettings() {
 		() => (localStorage.getItem("bloom-notch-remember-panel") ??
 			localStorage.getItem("bloom-notch-click-to-open")) !== "false"
 	);
-	const [notchDefaultPanel, setNotchDefaultPanel] = useState<"calendar" | "command-center">(
-		() => localStorage.getItem("bloom-notch-default-panel") === "command-center"
-			? "command-center" : "calendar"
+	const [notchDefaultPanel, setNotchDefaultPanel] = useState<NotchPanelChoice>(() =>
+		asPanelChoice(localStorage.getItem("bloom-notch-default-panel"))
 	);
 	const [musicCompactNotch, setMusicCompactNotch] = useState(true);
 	const [shelfPersist, setShelfPersist] = useState(
@@ -71,6 +89,9 @@ export function useSettings() {
 	const [cornersEnabled, setCornersEnabled] = useState(
 		() => localStorage.getItem("bloom-corners-enabled") === "true"
 	);
+	const [edgeShineEnabled, setEdgeShineEnabled] = useState(
+		() => localStorage.getItem("bloom-edge-shine-enabled") !== "false"
+	);
 	const [showUpdateIndicator, setShowUpdateIndicator] = useState(
 		() => localStorage.getItem("bloom-show-update-indicator") !== "false"
 	);
@@ -91,6 +112,9 @@ export function useSettings() {
 	const [dockPreviewEnabled, setDockPreviewEnabled] = useState(true);
 	const [dockIconOnly, setDockIconOnly] = useState(
 		() => localStorage.getItem("bloom-dock-icon-only") === "true"
+	);
+	const [dockShowBackgroundApps, setDockShowBackgroundApps] = useState(
+		() => localStorage.getItem("bloom-dock-show-background-apps") !== "false"
 	);
 	const [dockSeparatorEnabled, setDockSeparatorEnabled] = useState(
 		() => localStorage.getItem("bloom-dock-separator-enabled") !== "false"
@@ -199,13 +223,15 @@ export function useSettings() {
 
 			apply(getVal("bloom-weather-enabled"), setWeatherEnabled, readBool);
 			apply(getVal("bloom-calendar-enabled"), setCalendarEnabled, readBool);
+			apply(getVal("bloom-calendar-monday-first"), setCalendarMondayFirst, readBool);
+			apply(getVal("bloom-notch-command-center-enabled"), setControlsPanelEnabled, readBool);
+			apply(getVal("bloom-notch-devices-enabled"), setDevicesPanelEnabled, readBool);
 			apply(getVal("bloom-info-centre"), setInfoCentre, readBool);
 			apply(getVal("bloom-timer-sound-enabled"), setTimerSoundEnabled, readBool);
 			apply(getVal("bloom-music-mode-enabled"), setMusicModeEnabled, readBool);
 			apply(getVal("bloom-notch-remember-panel") ?? getVal("bloom-notch-click-to-open"),
 				setNotchRememberPanel, readBool);
-			apply(getVal("bloom-notch-default-panel"), setNotchDefaultPanel,
-				(v) => v === "command-center" ? "command-center" : "calendar");
+			apply(getVal("bloom-notch-default-panel"), setNotchDefaultPanel, asPanelChoice);
 			apply(getVal("bloom-music-compact-notch"), setMusicCompactNotch, readBool);
 			apply(getVal("bloom-shelf-persist"), setShelfPersist, readBool);
 			apply(getVal("bloom-volume-overlay-enabled"), setVolumeOverlayEnabled, readBool);
@@ -213,6 +239,7 @@ export function useSettings() {
 			apply(getVal("bloom-media-ambience-enabled"), setMediaAmbienceEnabled, readBool);
 			apply(getVal("bloom-media-compact-glow-enabled"), setMediaCompactGlowEnabled, readBool);
 			apply(getVal("bloom-corners-enabled"), setCornersEnabled, readBool);
+			setEdgeShineEnabled(getVal("bloom-edge-shine-enabled") !== "false");
 			apply(getVal("bloom-time-format-24h"), setTimeFormat24h, readBool);
 			apply(getVal("bloom-show-update-indicator"), setShowUpdateIndicator, readBool);
 			apply(getVal("bloom-auto-update"), setAutoUpdate, readBool);
@@ -220,6 +247,7 @@ export function useSettings() {
 			apply(getVal("bloom-brightness-edge-enabled"), setBrightnessEdgeEnabled, readBool);
 			apply(getVal("bloom-dock-enabled"), setDockEnabled, readBool);
 			apply(getVal("bloom-dock-preview-enabled"), setDockPreviewEnabled, readBool);
+			setDockShowBackgroundApps(getVal("bloom-dock-show-background-apps") !== "false");
 			apply(getVal("bloom-dock-icon-only"), setDockIconOnly, readBool);
 			apply(getVal("bloom-dock-separator-enabled"), setDockSeparatorEnabled, readBool);
 			apply(getVal("bloom-start-icon"), setStartIcon, (v) => v);
@@ -263,6 +291,9 @@ export function useSettings() {
 		} catch (e) {
 			console.error("Failed to load settings:", e);
 		}
+		// Also reveal the controls on failure, so a load error cannot trap the
+		// user behind the opening indicator. A stale-mirror reload returns above.
+		setIsLoaded(true);
 	}, []);
 
 	// The file write is authoritative. Serialize controls that change several
@@ -278,6 +309,8 @@ export function useSettings() {
 				console.error(`Failed to save ${key}:`, error);
 				saveFailed.current = true;
 				sessionStorage.setItem("bloom-settings-save-error", "true");
+				sessionStorage.setItem("bloom-settings-save-error-detail", String(error));
+				setSaveErrorDetail(String(error));
 				setSaveError(true);
 				window.setTimeout(() => window.location.reload(), 0);
 				return false;
@@ -286,6 +319,7 @@ export function useSettings() {
 				if (value === null) localStorage.removeItem(key);
 				else localStorage.setItem(key, value);
 				sessionStorage.removeItem("bloom-settings-save-error");
+				sessionStorage.removeItem("bloom-settings-save-error-detail");
 			} catch (error) {
 				// The file is saved; a mirror failure must not be reported as a failed write.
 				console.warn("Settings mirror update failed:", error);
@@ -308,6 +342,8 @@ export function useSettings() {
 				console.error(`Failed to save ${key}:`, error);
 				saveFailed.current = true;
 				sessionStorage.setItem("bloom-settings-save-error", "true");
+				sessionStorage.setItem("bloom-settings-save-error-detail", String(error));
+				setSaveErrorDetail(String(error));
 				setSaveError(true);
 				window.setTimeout(() => window.location.reload(), 0);
 				return false;
@@ -315,6 +351,7 @@ export function useSettings() {
 			try {
 				localStorage.removeItem(key);
 				sessionStorage.removeItem("bloom-settings-save-error");
+				sessionStorage.removeItem("bloom-settings-save-error-detail");
 			} catch (error) {
 				console.warn("Settings mirror cleanup failed:", error);
 			}
@@ -327,6 +364,8 @@ export function useSettings() {
 
 	const dismissSaveError = () => {
 		sessionStorage.removeItem("bloom-settings-save-error");
+		sessionStorage.removeItem("bloom-settings-save-error-detail");
+		setSaveErrorDetail("");
 		setSaveError(false);
 	};
 
@@ -356,6 +395,7 @@ export function useSettings() {
 		"bloom-dock-separator-enabled": setDockSeparatorEnabled,
 		"bloom-start-icon": setStartIcon,
 		"bloom-dock-preview-enabled": setDockPreviewEnabled,
+		"bloom-dock-show-background-apps": { set: setDockShowBackgroundApps, defaultValue: true },
 		"bloom-dock-adaptive": setDockAdaptive,
 		"bloom-dock-win-number-enabled": setDockWinNumberEnabled,
 		"bloom-dock-extras-position": setDockExtrasPosition,
@@ -367,17 +407,21 @@ export function useSettings() {
 		"bloom-dock-extras-custom-folders": setDockExtrasCustomFolders,
 		"bloom-weather-enabled": setWeatherEnabled,
 		"bloom-calendar-enabled": setCalendarEnabled,
+		"bloom-calendar-monday-first": setCalendarMondayFirst,
+		"bloom-notch-command-center-enabled": setControlsPanelEnabled,
+		"bloom-notch-devices-enabled": setDevicesPanelEnabled,
 		"bloom-info-centre": setInfoCentre,
 		"bloom-timer-sound-enabled": setTimerSoundEnabled,
 		"bloom-music-mode-enabled": setMusicModeEnabled,
 		"bloom-notch-remember-panel": setNotchRememberPanel,
 		"bloom-notch-default-panel": (v: unknown) =>
-			setNotchDefaultPanel(v === "command-center" ? "command-center" : "calendar"),
+			setNotchDefaultPanel(asPanelChoice(v)),
 		"bloom-music-compact-notch": setMusicCompactNotch,
 		"bloom-media-ambience-enabled": setMediaAmbienceEnabled,
 		"bloom-media-compact-glow-enabled": setMediaCompactGlowEnabled,
 		"bloom-media-layout": setMediaLayout,
 		"bloom-corners-enabled": setCornersEnabled,
+		"bloom-edge-shine-enabled": setEdgeShineEnabled,
 		"bloom-show-update-indicator": setShowUpdateIndicator,
 		"bloom-time-format-24h": setTimeFormat24h,
 		"bloom-low-battery-threshold": setLowBatteryThreshold,
@@ -524,12 +568,36 @@ export function useSettings() {
 		saveSetting("bloom-weather-enabled", String(next));
 	};
 
+	// The notch needs at least one panel, so the last one on can't be turned off.
+	const enabledPanelCount =
+		Number(calendarEnabled) + Number(controlsPanelEnabled) + Number(devicesPanelEnabled);
+
+	const toggleCalendarMondayFirst = () => {
+		const next = !calendarMondayFirst;
+		setCalendarMondayFirst(next);
+		saveSetting("bloom-calendar-monday-first", String(next));
+	};
+
 	const toggleCalendar = () => {
 		const next = !calendarEnabled;
+		if (!next && enabledPanelCount <= 1) return;
 		setCalendarEnabled(next);
 		saveSetting("bloom-calendar-enabled", String(next));
 	};
 
+	const toggleControlsPanel = () => {
+		const next = !controlsPanelEnabled;
+		if (!next && enabledPanelCount <= 1) return;
+		setControlsPanelEnabled(next);
+		saveSetting("bloom-notch-command-center-enabled", String(next));
+	};
+
+	const toggleDevicesPanel = () => {
+		const next = !devicesPanelEnabled;
+		if (!next && enabledPanelCount <= 1) return;
+		setDevicesPanelEnabled(next);
+		saveSetting("bloom-notch-devices-enabled", String(next));
+	};
 
 	const toggleInfoCentre = () => {
 		const next = !infoCentre;
@@ -555,7 +623,7 @@ export function useSettings() {
 		saveSetting("bloom-notch-remember-panel", String(next));
 	};
 
-	const changeNotchDefaultPanel = (panel: "calendar" | "command-center") => {
+	const changeNotchDefaultPanel = (panel: NotchPanelChoice) => {
 		setNotchDefaultPanel(panel);
 		saveSetting("bloom-notch-default-panel", panel);
 	};
@@ -613,6 +681,11 @@ export function useSettings() {
 		saveSetting("bloom-media-compact-glow-enabled", String(next));
 	};
 
+	const toggleEdgeShine = () => {
+		const next = !edgeShineEnabled;
+		setEdgeShineEnabled(next);
+		saveSetting("bloom-edge-shine-enabled", String(next));
+	};
 	const toggleCorners = () => {
 		const next = !cornersEnabled;
 		setCornersEnabled(next);
@@ -647,6 +720,12 @@ export function useSettings() {
 		const next = !dockPreviewEnabled;
 		setDockPreviewEnabled(next);
 		saveSetting("bloom-dock-preview-enabled", String(next));
+	};
+
+	const toggleDockShowBackgroundApps = () => {
+		const next = !dockShowBackgroundApps;
+		setDockShowBackgroundApps(next);
+		saveSetting("bloom-dock-show-background-apps", String(next));
 	};
 
 	const toggleDockIconOnly = () => {
@@ -928,7 +1007,10 @@ export function useSettings() {
 	};
 
 	return {
+		isLoaded,
+		flushPendingSaves,
 		saveError,
+		saveErrorDetail,
 		dismissSaveError,
 		// System
 		autostart,
@@ -945,6 +1027,8 @@ export function useSettings() {
 		handleScaleChange,
 		cornersEnabled,
 		toggleCorners,
+		edgeShineEnabled,
+		toggleEdgeShine,
 
 		// Theme
 		themeMode,
@@ -963,8 +1047,15 @@ export function useSettings() {
 		setNotchModeValue,
 		notchEdgeDelay,
 		handleNotchEdgeDelayChange,
+		calendarMondayFirst,
+		toggleCalendarMondayFirst,
 		calendarEnabled,
 		toggleCalendar,
+		controlsPanelEnabled,
+		toggleControlsPanel,
+		devicesPanelEnabled,
+		toggleDevicesPanel,
+		enabledPanelCount,
 		infoCentre,
 		toggleInfoCentre,
 		timerSoundEnabled,
@@ -1012,6 +1103,8 @@ export function useSettings() {
 		handleDockEdgeDelayChange,
 		dockPreviewEnabled,
 		toggleDockPreview,
+		dockShowBackgroundApps,
+		toggleDockShowBackgroundApps,
 		dockIconOnly,
 		toggleDockIconOnly,
 		dockSeparatorEnabled,

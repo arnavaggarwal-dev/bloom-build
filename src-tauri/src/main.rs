@@ -5,15 +5,20 @@ mod battery;
 #[cfg(windows)]
 mod bluetooth;
 #[cfg(windows)]
+mod buds;
+#[cfg(windows)]
 mod cava;
 mod commands;
 mod connect;
 mod diagnostics;
 #[cfg(windows)]
 mod dock_extras;
+#[cfg(windows)]
+mod jack;
 #[cfg(target_os = "linux")]
 mod linux;
 mod services;
+mod settings_window;
 #[cfg(windows)]
 mod shelf;
 mod shelf_preview;
@@ -22,6 +27,8 @@ mod state;
 mod tray;
 mod types;
 mod updater;
+#[cfg(windows)]
+mod usb;
 mod utils;
 #[cfg(windows)]
 mod wifi;
@@ -140,6 +147,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             hide_native_osd,
             open_settings_window,
+            close_settings_window,
             open_wifi_settings,
             open_sound_settings,
             open_notification_center,
@@ -169,6 +177,7 @@ fn main() {
             #[cfg(windows)]
             window_region::set_window_region,
             set_dock_hovered,
+            set_dock_popup_active,
             set_notch_hovered,
             set_notch_visible,
             #[cfg(windows)]
@@ -284,7 +293,13 @@ fn main() {
             #[cfg(windows)]
             bluetooth::bluetooth_pairing_respond,
             #[cfg(windows)]
-            bluetooth::bluetooth_unpair
+            bluetooth::bluetooth_unpair,
+            #[cfg(windows)]
+            bluetooth::bluetooth_refresh_buds,
+            #[cfg(windows)]
+            usb::usb_list_devices,
+            #[cfg(windows)]
+            jack::jack_list_devices
         ])
         .setup(|app| {
             init_taskbar_marker(app.handle());
@@ -450,6 +465,10 @@ fn main() {
             wifi::setup_wifi_notifications(app.handle().clone());
             #[cfg(windows)]
             bluetooth::setup_bluetooth_notifications(app.handle().clone());
+            #[cfg(windows)]
+            usb::setup_usb_notifications(app.handle().clone());
+            #[cfg(windows)]
+            jack::setup_jack_notifications(app.handle().clone());
 
             // Listen for second-instance signal to open settings
             #[cfg(target_os = "linux")]
@@ -472,19 +491,6 @@ fn main() {
                 }
             }
 
-            if let Some(settings_win) = app.get_webview_window("settings") {
-                #[cfg(target_os = "windows")]
-                {
-                    let _ = window_vibrancy::apply_mica(&settings_win, None);
-                }
-                let win_clone = settings_win.clone();
-                settings_win.on_window_event(move |event| {
-                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                        api.prevent_close();
-                        let _ = win_clone.hide();
-                    }
-                });
-            }
             {
                 use tauri::menu::{Menu, MenuItem};
                 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
